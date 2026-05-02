@@ -9,6 +9,8 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var showingSavePreset = false
+    @State private var newPresetName = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,6 +23,35 @@ struct ContentView: View {
                 Spacer()
                 
                 HStack(spacing: 16) {
+                    Menu {
+                        ForEach(appState.savedPresets, id: \.self) { presetName in
+                            Button(presetName) {
+                                withAnimation {
+                                    appState.loadPreset(name: presetName)
+                                }
+                            }
+                        }
+                        if !appState.savedPresets.isEmpty {
+                            Divider()
+                            Menu("Delete Preset") {
+                                ForEach(appState.savedPresets, id: \.self) { presetName in
+                                    Button(presetName) {
+                                        appState.deletePreset(name: presetName)
+                                    }
+                                }
+                            }
+                            Divider()
+                        }
+                        Button("Save as Preset...") {
+                            newPresetName = ""
+                            showingSavePreset = true
+                        }
+                    } label: {
+                        Label("Presets", systemImage: "list.bullet")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    
                     Toggle("Bypass", isOn: Binding(
                         get: { appState.settings.bypass },
                         set: { appState.setBypass($0) }
@@ -60,28 +91,13 @@ struct ContentView: View {
                 .background(Color.orange.opacity(0.12))
                 
                 Divider()
-            } else if appState.isProcessing {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 7, height: 7)
-                    Text(appState.statusText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(Color.green.opacity(0.07))
-                
-                Divider()
             }
 
             ScrollView {
                 VStack(spacing: 24) {
                     
                     // Output & Health Section
-                    HStack(alignment: .top, spacing: 20) {
+                    HStack(spacing: 20) {
                         // Output Gain Group
                         GroupBox {
                             VStack(alignment: .leading, spacing: 12) {
@@ -116,8 +132,11 @@ struct ContentView: View {
                                             .frame(width: 20, alignment: .leading)
                                     }
                                 }
+                                
+                                Spacer()
                             }
                             .padding(4)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         }
                         
                         // Audio Health Group
@@ -128,10 +147,14 @@ struct ContentView: View {
                                     .foregroundStyle(.primary)
                                 
                                 AudioHealthView(health: appState.audioHealth, isProcessing: appState.isProcessing)
+                                
+                                Spacer()
                             }
                             .padding(4)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         }
                     }
+                    .fixedSize(horizontal: false, vertical: true)
 
                     // Bands Section
                     VStack(alignment: .leading, spacing: 16) {
@@ -198,6 +221,15 @@ struct ContentView: View {
             .padding()
             .background(Material.bar)
         }
+        .alert("Save Preset", isPresented: $showingSavePreset) {
+            TextField("Preset Name", text: $newPresetName)
+            Button("Save") {
+                if !newPresetName.isEmpty {
+                    appState.savePreset(name: newPresetName)
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        }
     }
 }
 
@@ -211,12 +243,6 @@ private struct AudioHealthView: View {
                 healthItem("Tap SR", sampleRateText(health.tapSampleRate))
                 healthItem("Out SR", sampleRateText(health.outputSampleRate))
                 healthItem("Fill", "\(health.bufferFillFrames)")
-            }
-
-            GridRow {
-                healthItem("Und", "\(health.underruns)")
-                healthItem("Drop", "\(health.droppedFrames)")
-                healthItem("Trim", "\(health.trimmedFrames)")
             }
 
             GridRow {

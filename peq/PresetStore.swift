@@ -30,4 +30,29 @@ final class PresetStore {
             defaults.removeObject(forKey: key)
         }
     }
+    
+    func savePreset(_ settings: EQSettings, name: String) {
+        do {
+            let data = try encoder.encode(settings.sanitized())
+            defaults.set(data, forKey: "peq.preset.\(name)")
+        } catch {}
+    }
+    
+    func loadPreset(name: String) -> EQSettings? {
+        guard let data = defaults.data(forKey: "peq.preset.\(name)") else { return nil }
+        return try? decoder.decode(EQSettings.self, from: data).sanitized()
+    }
+    
+    func getSavedPresets() -> [String] {
+        return defaults.dictionaryRepresentation().keys.compactMap { dictKey in
+            if dictKey.hasPrefix("peq.preset.") {
+                return String(dictKey.dropFirst("peq.preset.".count))
+            }
+            return nil
+        }.sorted()
+    }
+
+    func deletePreset(name: String) {
+        defaults.removeObject(forKey: "peq.preset.\(name)")
+    }
 }

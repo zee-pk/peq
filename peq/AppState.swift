@@ -10,6 +10,7 @@ final class AppState: ObservableObject {
     @Published private(set) var hasError = false
     @Published private(set) var audioHealth = AudioHealthSnapshot.empty
     @Published var settings: EQSettings
+    @Published private(set) var savedPresets: [String] = []
 
     private let presetStore = PresetStore()
     private let deviceManager = DeviceManager()
@@ -21,7 +22,30 @@ final class AppState: ObservableObject {
 
     init() {
         self.settings = presetStore.load()
+        self.savedPresets = presetStore.getSavedPresets()
     }
+
+    func refreshPresets() {
+        savedPresets = presetStore.getSavedPresets()
+    }
+
+    func savePreset(name: String) {
+        presetStore.savePreset(settings, name: name)
+        refreshPresets()
+    }
+
+    func loadPreset(name: String) {
+        if let preset = presetStore.loadPreset(name: name) {
+            settings = preset
+            persistAndRebuildIfNeeded()
+        }
+    }
+
+    func deletePreset(name: String) {
+        presetStore.deletePreset(name: name)
+        refreshPresets()
+    }
+
 
     func startMonitoring() {
         let shouldProcess = UserDefaults.standard.bool(forKey: "peq.isProcessing")
