@@ -7,6 +7,7 @@
 
 import AppKit
 import SwiftUI
+import ServiceManagement
 
 @main
 struct peqApp: App {
@@ -27,8 +28,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSLog("peq launched")
         // .accessory = no dock icon, no main menu bar
         NSApp.setActivationPolicy(.accessory)
-        appState.startMonitoring()
+        
+        if !UserDefaults.standard.bool(forKey: "hasRunBefore") {
+            UserDefaults.standard.set(true, forKey: "hasRunBefore")
+            try? SMAppService.mainApp.register()
+        }
+        
         statusController = StatusBarController(appState: appState)
+        
+        Task {
+            await PermissionManager.shared.checkPermissions()
+            if PermissionManager.shared.hasScreenRecordingPermission {
+                appState.startMonitoring()
+            } else {
+                statusController?.showPermissionWindow()
+                // Poll until granted (e.g. user returns from System Settings)
+                startPermissionPolling()
+            }
+        }
+    }
+    
+    private func startPermissionPolling() {
+        Task {
+            while true {
+                try? await Task.sleep(for: .seconds(2))
+                await PermissionManager.shared.checkPermissions()
+                if PermissionManager.shared.hasScreenRecordingPermission {
+                    appState.startMonitoring()
+                    statusController?.closePermissionWindow()
+                    break
+                }
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -45,6 +76,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private let appState: AppState
     private let statusItem: NSStatusItem
     private var appWindow: NSPanel?
+    private var permissionWindow: NSPanel?
 
     init(appState: AppState) {
         self.appState = appState
@@ -63,14 +95,77 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     @objc private func toggleWindow(_ sender: NSStatusBarButton) {
-        if let window = appWindow, window.isVisible {
-            window.orderOut(nil)
+        guard let event = NSApp.currentEvent else { return }
+        
+        if event.type == .rightMouseUp {
+            let menu = NSMenu()
+            
+            let toggleEQItem = NSMenuItem(
+                title: appState.isProcessing ? "Disable EQ" : "Enable EQ",
+                action: #selector(toggleEQ),
+                keyEquivalent: ""
+            )
+            toggleEQItem.target = self
+            menu.addItem(toggleEQItem)
+            
+            let bypassItem = NSMenuItem(
+                title: "Bypass",
+                action: #selector(toggleBypass),
+                keyEquivalent: ""
+            )
+            bypassItem.target = self
+            bypassItem.state = appState.settings.bypass ? .on : .off
+            menu.addItem(bypassItem)
+            
+            menu.addItem(.separator())
+            
+            let launchAtLoginItem = NSMenuItem(
+                title: "Launch at Login",
+                action: #selector(toggleLaunchAtLogin),
+                keyEquivalent: ""
+            )
+            launchAtLoginItem.target = self
+            launchAtLoginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+            menu.addItem(launchAtLoginItem)
+            
+            let quitItem = NSMenuItem(
+                title: "Quit",
+                action: #selector(NSApplication.terminate(_:)),
+                keyEquivalent: "q"
+            )
+            menu.addItem(quitItem)
+            
+            statusItem.menu = menu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil
         } else {
-            showWindow()
+            if let window = appWindow, window.isVisible {
+                window.orderOut(nil)
+            } else {
+                showWindow()
+            }
+        }
+    }
+    
+    @objc private func toggleEQ() {
+        appState.setProcessing(!appState.isProcessing)
+    }
+
+    @objc private func toggleBypass() {
+        appState.setBypass(!appState.settings.bypass)
+    }
+    
+    @objc private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        if service.status == .enabled {
+            try? service.unregister()
+        } else {
+            try? service.register()
         }
     }
 
     private func showWindow() {
+        var needsInitialPositioning = false
         if appWindow == nil {
             let hostingView = NSHostingController(
                 rootView: ContentView()
@@ -84,17 +179,26 @@ final class StatusBarController: NSObject, NSWindowDelegate {
                 backing: .buffered,
                 defer: false
             )
-            panel.title = "peq"
+            panel.title = "Parametric Equalizer"
             panel.isReleasedWhenClosed = false
             panel.contentViewController = hostingView
             panel.delegate = self
             panel.isMovableByWindowBackground = true
             panel.level = .floating
             panel.hidesOnDeactivate = false
+            
+            if UserDefaults.standard.string(forKey: "NSWindow Frame peqMainWindow") == nil {
+                needsInitialPositioning = true
+            }
+            
+            panel.setFrameAutosaveName("peqMainWindow")
             appWindow = panel
         }
 
-        positionWindowNearStatusItem()
+        if needsInitialPositioning {
+            positionWindowNearStatusItem()
+        }
+        
         appWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -116,7 +220,39 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         window.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
-    // MARK: - NSWindowDelegate
+    // MARK: - Permission Window
+
+    func showPermissionWindow() {
+        if permissionWindow == nil {
+            let hosting = NSHostingController(
+                rootView: PermissionView(permissionManager: PermissionManager.shared)
+                    .frame(width: 440)
+            )
+            hosting.view.setFrameSize(NSSize(width: 440, height: hosting.sizeThatFits(in: NSSize(width: 440, height: 9999)).height))
+
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
+                styleMask: [.titled, .closable, .nonactivatingPanel, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            panel.title = "Permissions"
+            panel.isReleasedWhenClosed = false
+            panel.contentViewController = hosting
+            panel.delegate = self
+            panel.level = .floating
+            panel.hidesOnDeactivate = false
+            panel.center()
+            permissionWindow = panel
+        }
+        permissionWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func closePermissionWindow() {
+        permissionWindow?.orderOut(nil)
+        permissionWindow = nil
+    }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)

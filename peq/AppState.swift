@@ -24,6 +24,8 @@ final class AppState: ObservableObject {
     }
 
     func startMonitoring() {
+        let shouldProcess = UserDefaults.standard.bool(forKey: "peq.isProcessing")
+        
         deviceManager.start { [weak self] reason in
             DispatchQueue.main.async {
                 self?.handleDeviceChange(reason: reason)
@@ -50,9 +52,14 @@ final class AppState: ObservableObject {
                 }
             }
         }
+        
+        if shouldProcess {
+            setProcessing(true)
+        }
     }
 
     func setProcessing(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "peq.isProcessing")
         if enabled {
             do {
                 try audioPipeline.start(settings: settings)

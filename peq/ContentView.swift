@@ -11,89 +11,193 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Toggle("Enable EQ", isOn: Binding(
-                get: { appState.isProcessing },
-                set: { appState.setProcessing($0) }
-            ))
-
-            Toggle("Bypass", isOn: Binding(
-                get: { appState.settings.bypass },
-                set: { appState.setBypass($0) }
-            ))
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Output Gain")
-                    Spacer()
-                    HStack(spacing: 4) {
-                        NumberField(
-                            value: Binding(
-                                get: { appState.settings.outputGainDb },
-                                set: { appState.setOutputGain($0) }
-                            ),
-                            range: EQLimits.outputGainDb,
-                            step: 0.5,
-                            fractionDigits: 1,
-                            width: 64
-                        )
-                        Text("dB")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Label("Parametric Equalizer", systemImage: "slider.horizontal.3")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.primary)
+                
+                Spacer()
+                
+                HStack(spacing: 16) {
+                    Toggle("Bypass", isOn: Binding(
+                        get: { appState.settings.bypass },
+                        set: { appState.setBypass($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    
+                    Toggle("Enable EQ", isOn: Binding(
+                        get: { appState.isProcessing },
+                        set: { appState.setProcessing($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .tint(.accentColor)
                 }
-
-                Slider(
-                    value: Binding(
-                        get: { appState.settings.outputGainDb },
-                        set: { appState.setOutputGain($0) }
-                    ),
-                    in: EQLimits.outputGainDb,
-                    step: 0.5
-                )
             }
-
-            AudioHealthView(health: appState.audioHealth, isProcessing: appState.isProcessing)
-
+            .padding()
+            .background(Material.bar)
+            
             Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(appState.settings.bands) { band in
-                        BandRow(
-                            band: band,
-                            canRemove: appState.settings.bands.count > 1,
-                            onChange: { appState.updateBand($0) },
-                            onRemove: { appState.removeBand(band) }
-                        )
-                    }
-
-                    Button {
-                        appState.addBand()
-                    } label: {
-                        Label("Add Band", systemImage: "plus.circle")
+            
+            // Status / Error Banner
+            if appState.hasError {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(appState.statusText)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Button("Retry") {
+                        appState.setProcessing(true)
                     }
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.orange.opacity(0.12))
+                
+                Divider()
+            } else if appState.isProcessing {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 7, height: 7)
+                    Text(appState.statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(Color.green.opacity(0.07))
+                
+                Divider()
             }
-            .frame(minHeight: 320)
+
+            ScrollView {
+                VStack(spacing: 24) {
+                    
+                    // Output & Health Section
+                    HStack(alignment: .top, spacing: 20) {
+                        // Output Gain Group
+                        GroupBox {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Label("Output Gain", systemImage: "speaker.wave.2.fill")
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                
+                                HStack(spacing: 12) {
+                                    Slider(
+                                        value: Binding(
+                                            get: { appState.settings.outputGainDb },
+                                            set: { appState.setOutputGain($0) }
+                                        ),
+                                        in: EQLimits.outputGainDb,
+                                        step: 0.5
+                                    )
+                                    
+                                    HStack(spacing: 4) {
+                                        NumberField(
+                                            value: Binding(
+                                                get: { appState.settings.outputGainDb },
+                                                set: { appState.setOutputGain($0) }
+                                            ),
+                                            range: EQLimits.outputGainDb,
+                                            step: 0.5,
+                                            fractionDigits: 1,
+                                            width: 60
+                                        )
+                                        Text("dB")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 20, alignment: .leading)
+                                    }
+                                }
+                            }
+                            .padding(4)
+                        }
+                        
+                        // Audio Health Group
+                        GroupBox {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Label("Audio Health", systemImage: "waveform.path.ecg")
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                
+                                AudioHealthView(health: appState.audioHealth, isProcessing: appState.isProcessing)
+                            }
+                            .padding(4)
+                        }
+                    }
+
+                    // Bands Section
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            Label("Equalizer Bands", systemImage: "slider.vertical.3")
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                            
+                            Spacer()
+                            
+                            Button {
+                                withAnimation {
+                                    appState.addBand()
+                                }
+                            } label: {
+                                Label("Add Band", systemImage: "plus.circle.fill")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
+                            .font(.headline)
+                        }
+                        
+                        VStack(spacing: 16) {
+                            ForEach(appState.settings.bands) { band in
+                                GroupBox {
+                                    BandRow(
+                                        band: band,
+                                        canRemove: appState.settings.bands.count > 1,
+                                        onChange: { appState.updateBand($0) },
+                                        onRemove: { 
+                                            withAnimation {
+                                                appState.removeBand(band)
+                                            }
+                                        }
+                                    )
+                                    .padding(4)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(20)
+            }
+            .background(Color(NSColor.windowBackgroundColor))
 
             Divider()
-
+            
             HStack {
                 Button("Reset Defaults") {
-                    appState.resetDefaults()
+                    withAnimation {
+                        appState.resetDefaults()
+                    }
                 }
-
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                
                 Spacer()
-
+                
                 Button("Quit") {
                     NSApplication.shared.terminate(nil)
                 }
                 .keyboardShortcut("q")
             }
+            .padding()
+            .background(Material.bar)
         }
-        .padding(14)
     }
 }
 
@@ -102,7 +206,7 @@ private struct AudioHealthView: View {
     let isProcessing: Bool
 
     var body: some View {
-        Grid(horizontalSpacing: 18, verticalSpacing: 5) {
+        Grid(horizontalSpacing: 24, verticalSpacing: 8) {
             GridRow {
                 healthItem("Tap SR", sampleRateText(health.tapSampleRate))
                 healthItem("Out SR", sampleRateText(health.outputSampleRate))
@@ -129,10 +233,11 @@ private struct AudioHealthView: View {
         HStack(spacing: 4) {
             Text(label)
                 .foregroundStyle(.tertiary)
+            Spacer()
             Text(value)
                 .monospacedDigit()
+                .foregroundStyle(.primary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func sampleRateText(_ sampleRate: Double) -> String {
@@ -158,61 +263,82 @@ private struct BandRow: View {
     let onRemove: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Toggle(isOn: binding(\.enabled)) {
+                    Text(band.name)
+                        .font(.headline)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                
+                Spacer()
+                
                 Button(action: onRemove) {
-                    Image(systemName: "minus.circle")
+                    Image(systemName: "trash")
                 }
                 .buttonStyle(.plain)
                 .disabled(!canRemove)
-                .foregroundStyle(canRemove ? .secondary : .tertiary)
-
-                Toggle(isOn: binding(\.enabled)) {
-                    Text(band.name)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                }
+                .foregroundStyle(canRemove ? Color.red.opacity(0.8) : Color.gray)
             }
 
-            Grid(horizontalSpacing: 10, verticalSpacing: 6) {
+            Grid(horizontalSpacing: 16, verticalSpacing: 10) {
                 GridRow {
-                    rowLabel("Hz")
+                    rowLabel("Freq")
                     Slider(value: binding(\.frequencyHz), in: EQLimits.frequencyHz)
-                    NumberField(
-                        value: binding(\.frequencyHz),
-                        range: EQLimits.frequencyHz,
-                        step: 1,
-                        fractionDigits: 0,
-                        width: 76
-                    )
+                        .tint(.orange)
+                    HStack(spacing: 4) {
+                        NumberField(
+                            value: binding(\.frequencyHz),
+                            range: EQLimits.frequencyHz,
+                            step: 1,
+                            fractionDigits: 0,
+                            width: 60
+                        )
+                        Text("Hz")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20, alignment: .leading)
+                    }
                 }
 
                 GridRow {
-                    rowLabel("dB")
+                    rowLabel("Gain")
                     Slider(value: binding(\.gainDb), in: EQLimits.bandGainDb, step: 0.5)
-                    NumberField(
-                        value: binding(\.gainDb),
-                        range: EQLimits.bandGainDb,
-                        step: 0.5,
-                        fractionDigits: 1,
-                        width: 64
-                    )
+                        .tint(.blue)
+                    HStack(spacing: 4) {
+                        NumberField(
+                            value: binding(\.gainDb),
+                            range: EQLimits.bandGainDb,
+                            step: 0.5,
+                            fractionDigits: 1,
+                            width: 60
+                        )
+                        Text("dB")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20, alignment: .leading)
+                    }
                 }
 
                 GridRow {
-                    rowLabel("BW")
+                    rowLabel("Q")
                     Slider(value: binding(\.bandwidth), in: EQLimits.bandwidth, step: 0.05)
-                    NumberField(
-                        value: binding(\.bandwidth),
-                        range: EQLimits.bandwidth,
-                        step: 0.05,
-                        fractionDigits: 2,
-                        width: 64
-                    )
+                        .tint(.green)
+                    HStack(spacing: 4) {
+                        NumberField(
+                            value: binding(\.bandwidth),
+                            range: EQLimits.bandwidth,
+                            step: 0.05,
+                            fractionDigits: 2,
+                            width: 60
+                        )
+                        Text("") // placeholder for alignment
+                            .frame(width: 20, alignment: .leading)
+                    }
                 }
             }
         }
-        .padding(.vertical, 4)
     }
 
     private func binding<Value>(_ keyPath: WritableKeyPath<EQBand, Value>) -> Binding<Value> {
@@ -230,7 +356,7 @@ private struct BandRow: View {
         Text(text)
             .font(.caption)
             .foregroundStyle(.secondary)
-            .frame(width: 24, alignment: .leading)
+            .frame(width: 32, alignment: .leading)
     }
 }
 
