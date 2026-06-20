@@ -2,6 +2,11 @@ import AudioToolbox
 import CoreAudio
 import Foundation
 
+struct OutputDevice: Identifiable, Equatable {
+    let id: String
+    let name: String
+}
+
 enum AudioDeviceChangeReason {
     case defaultOutputChanged
     case nominalSampleRateChanged
@@ -91,6 +96,17 @@ final class DeviceManager {
         try deviceUID(for: defaultOutputDeviceID())
     }
 
+    func outputDevices() -> [OutputDevice] {
+        allDeviceIDs()
+            .filter { !outputStreamIDs(for: $0).isEmpty }
+            .compactMap { deviceID in
+                guard let uid = try? deviceUID(for: deviceID) else { return nil }
+                let name = (try? deviceName(for: deviceID)) ?? uid
+                return OutputDevice(id: uid, name: name)
+            }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
     func deviceUID(for deviceID: AudioDeviceID) throws -> String {
         var uid: CFString = "" as CFString
         var size = UInt32(MemoryLayout<CFString>.size)
@@ -109,6 +125,64 @@ final class DeviceManager {
         }
 
         return uid as String
+    }
+
+    func deviceName(for deviceID: AudioDeviceID) throws -> String {
+        var name: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let status = withUnsafeMutablePointer(to: &name) { pointer in
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, pointer)
+        }
+
+        guard status == noErr else {
+            throw AudioRuntimeError.coreAudio("Unable to read the output device name", status)
+        }
+
+        return name as String
+    }
+
+    private func allDeviceIDs() -> [AudioDeviceID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &dataSize
+        ) == noErr else {
+            return []
+        }
+
+        let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        guard deviceCount > 0 else { return [] }
+
+        var deviceIDs = [AudioDeviceID](repeating: AudioDeviceID(kAudioObjectUnknown), count: deviceCount)
+        let status = deviceIDs.withUnsafeMutableBufferPointer { pointer -> OSStatus in
+            guard let baseAddress = pointer.baseAddress else { return kAudioHardwareUnspecifiedError }
+            return AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                0,
+                nil,
+                &dataSize,
+                baseAddress
+            )
+        }
+
+        guard status == noErr else { return [] }
+        return deviceIDs.filter { $0 != kAudioObjectUnknown }
     }
 
     private func addDefaultOutputListener() {

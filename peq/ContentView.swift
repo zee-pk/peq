@@ -6,23 +6,20 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @State private var showingSavePreset = false
     @State private var newPresetName = ""
+    @State private var draggedBandID: UUID?
+    @State private var dropTargetBandID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Label("Parametric Equalizer", systemImage: "slider.horizontal.3")
-                    .font(.title2.weight(.bold))
-                    .foregroundStyle(.primary)
-                
-                Spacer()
-                
-                HStack(spacing: 16) {
+                HStack(spacing: 8) {
                     Menu {
                         ForEach(appState.savedPresets, id: \.self) { presetName in
                             Button(presetName) {
@@ -47,11 +44,34 @@ struct ContentView: View {
                             showingSavePreset = true
                         }
                     } label: {
-                        Label("Presets", systemImage: "list.bullet")
+                        MaterialIconLabel(title: "Presets", icon: MaterialIconName.menu)
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
                     
+                    if let activePreset = appState.activePresetName {
+                        HStack(spacing: 4) {
+                            Text(activePreset)
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                            
+                            if appState.isPresetModified {
+                                Button {
+                                    appState.savePreset(name: activePreset)
+                                } label: {
+                                    MaterialIcon(name: MaterialIconName.save)
+                                        .help("Save changes to preset")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                
+                Spacer()
+                
+                HStack(spacing: 16) {
                     Toggle("Bypass", isOn: Binding(
                         get: { appState.settings.bypass },
                         set: { appState.setBypass($0) }
@@ -74,7 +94,7 @@ struct ContentView: View {
             // Status / Error Banner
             if appState.hasError {
                 HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
+                    MaterialIcon(name: MaterialIconName.warning, size: 20)
                         .foregroundStyle(.orange)
                     Text(appState.statusText)
                         .font(.callout)
@@ -101,9 +121,34 @@ struct ContentView: View {
                         // Output Gain Group
                         GroupBox {
                             VStack(alignment: .leading, spacing: 12) {
-                                Label("Output Gain", systemImage: "speaker.wave.2.fill")
+                                MaterialIconLabel(title: "Output Gain", icon: MaterialIconName.output)
                                     .font(.headline)
                                     .foregroundStyle(.primary)
+
+                                Picker(
+                                    "Device",
+                                    selection: Binding(
+                                        get: { appState.settings.targetOutputDeviceUID ?? "" },
+                                        set: { appState.setTargetOutputDeviceUID($0.isEmpty ? nil : $0) }
+                                    )
+                                ) {
+                                    Text("Select output device").tag("")
+                                    ForEach(appState.outputDevices) { device in
+                                        Text(device.name).tag(device.id)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(maxWidth: .infinity)
+
+                                if appState.settings.targetOutputDeviceUID == nil {
+                                    Text("Select the output device peq should follow.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else if !appState.isConfiguredOutputDeviceActive {
+                                    Text("EQ is bypassed until this device is the default output.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                                 
                                 HStack(spacing: 12) {
                                     Slider(
@@ -142,11 +187,21 @@ struct ContentView: View {
                         // Audio Health Group
                         GroupBox {
                             VStack(alignment: .leading, spacing: 12) {
-                                Label("Audio Health", systemImage: "waveform.path.ecg")
+                                MaterialIconLabel(title: "Audio Health", icon: MaterialIconName.health)
                                     .font(.headline)
                                     .foregroundStyle(.primary)
                                 
                                 AudioHealthView(health: appState.audioHealth, isProcessing: appState.isProcessing)
+
+                                HStack(spacing: 4) {
+                                    Text("Media Keys")
+                                        .foregroundStyle(.tertiary)
+                                    Spacer()
+                                    Text(appState.volumeHotkeyStatusText)
+                                        .monospacedDigit()
+                                        .foregroundStyle(.primary)
+                                }
+                                .font(.caption)
                                 
                                 Spacer()
                             }
@@ -159,7 +214,7 @@ struct ContentView: View {
                     // Bands Section
                     VStack(alignment: .leading, spacing: 16) {
                         HStack {
-                            Label("Equalizer Bands", systemImage: "slider.vertical.3")
+                            MaterialIconLabel(title: "Equalizer Bands", icon: MaterialIconName.tune)
                                 .font(.headline)
                                 .foregroundStyle(.primary)
                             
@@ -170,7 +225,7 @@ struct ContentView: View {
                                     appState.addBand()
                                 }
                             } label: {
-                                Label("Add Band", systemImage: "plus.circle.fill")
+                                MaterialIconLabel(title: "Add Band", icon: MaterialIconName.addCircle)
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(Color.accentColor)
@@ -178,12 +233,24 @@ struct ContentView: View {
                         }
                         
                         VStack(spacing: 16) {
-                            ForEach(appState.settings.bands) { band in
+                            ForEach(Array(appState.settings.bands.enumerated()), id: \.element.id) { index, band in
                                 GroupBox {
                                     BandRow(
                                         band: band,
                                         canRemove: appState.settings.bands.count > 1,
+                                        canMoveUp: index > 0,
+                                        canMoveDown: index < appState.settings.bands.count - 1,
                                         onChange: { appState.updateBand($0) },
+                                        onMoveUp: {
+                                            withAnimation {
+                                                appState.moveBand(band, by: -1)
+                                            }
+                                        },
+                                        onMoveDown: {
+                                            withAnimation {
+                                                appState.moveBand(band, by: 1)
+                                            }
+                                        },
                                         onRemove: { 
                                             withAnimation {
                                                 appState.removeBand(band)
@@ -192,7 +259,59 @@ struct ContentView: View {
                                     )
                                     .padding(4)
                                 }
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(Color.accentColor.opacity(dropTargetBandID == band.id ? 0.65 : 0), lineWidth: 2)
+                                }
+                                .onDrag {
+                                    draggedBandID = band.id
+                                    return NSItemProvider(object: band.id.uuidString as NSString)
+                                }
+                                .onDrop(
+                                    of: [UTType.text],
+                                    delegate: BandDropDelegate(
+                                        targetBandID: band.id,
+                                        draggedBandID: $draggedBandID,
+                                        dropTargetBandID: $dropTargetBandID,
+                                        onMove: { sourceID, targetID in
+                                            withAnimation {
+                                                appState.moveBand(withID: sourceID, before: targetID)
+                                            }
+                                        }
+                                    )
+                                )
                             }
+
+                            BandDropTail(
+                                isActive: draggedBandID != nil && dropTargetBandID == nil,
+                                onDrop: {
+                                    guard let draggedBandID else { return }
+                                    withAnimation {
+                                        appState.moveBand(withID: draggedBandID, before: nil)
+                                    }
+                                    self.draggedBandID = nil
+                                    dropTargetBandID = nil
+                                }
+                            )
+                            .onDrop(
+                                of: [UTType.text],
+                                delegate: BandTailDropDelegate(
+                                    draggedBandID: $draggedBandID,
+                                    dropTargetBandID: $dropTargetBandID,
+                                    onMoveToEnd: { sourceID in
+                                        withAnimation {
+                                            appState.moveBand(withID: sourceID, before: nil)
+                                        }
+                                    }
+                                )
+                            )
+                            .opacity(draggedBandID == nil ? 0 : 1)
+                            .animation(.default, value: draggedBandID)
+                        }
+                        .onDrop(of: [UTType.text], isTargeted: nil) { _ in
+                            draggedBandID = nil
+                            dropTargetBandID = nil
+                            return false
                         }
                     }
                 }
@@ -285,7 +404,11 @@ private struct AudioHealthView: View {
 private struct BandRow: View {
     let band: EQBand
     let canRemove: Bool
+    let canMoveUp: Bool
+    let canMoveDown: Bool
     let onChange: (EQBand) -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
     let onRemove: () -> Void
 
     var body: some View {
@@ -299,6 +422,24 @@ private struct BandRow: View {
                 .controlSize(.small)
                 
                 Spacer()
+
+                HStack(spacing: 8) {
+                    Button(action: onMoveUp) {
+                        MaterialIcon(name: MaterialIconName.arrowUp)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canMoveUp)
+                    .foregroundStyle(canMoveUp ? Color.secondary : Color.gray)
+                    .help("Move band up")
+
+                    Button(action: onMoveDown) {
+                        MaterialIcon(name: MaterialIconName.arrowDown)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canMoveDown)
+                    .foregroundStyle(canMoveDown ? Color.secondary : Color.gray)
+                    .help("Move band down")
+                }
                 
                 Button(action: onRemove) {
                     Image(systemName: "trash")
@@ -383,6 +524,85 @@ private struct BandRow: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .frame(width: 32, alignment: .leading)
+    }
+}
+
+private struct BandDropTail: View {
+    let isActive: Bool
+    let onDrop: () -> Void
+
+    var body: some View {
+        Button(action: onDrop) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                .foregroundStyle(Color.accentColor.opacity(isActive ? 0.8 : 0.35))
+                .frame(height: 36)
+                .overlay {
+                    Text("Drop here to move to end")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isActive)
+    }
+}
+
+private struct BandDropDelegate: DropDelegate {
+    let targetBandID: UUID
+    @Binding var draggedBandID: UUID?
+    @Binding var dropTargetBandID: UUID?
+    let onMove: (UUID, UUID) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard draggedBandID != targetBandID else { return }
+        dropTargetBandID = targetBandID
+    }
+
+    func dropExited(info: DropInfo) {
+        if dropTargetBandID == targetBandID {
+            dropTargetBandID = nil
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer {
+            draggedBandID = nil
+            dropTargetBandID = nil
+        }
+
+        guard let draggedBandID, draggedBandID != targetBandID else { return false }
+        onMove(draggedBandID, targetBandID)
+        return true
+    }
+}
+
+private struct BandTailDropDelegate: DropDelegate {
+    @Binding var draggedBandID: UUID?
+    @Binding var dropTargetBandID: UUID?
+    let onMoveToEnd: (UUID) -> Void
+
+    func dropEntered(info: DropInfo) {
+        dropTargetBandID = nil
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        defer {
+            draggedBandID = nil
+            dropTargetBandID = nil
+        }
+
+        guard let draggedBandID else { return false }
+        onMoveToEnd(draggedBandID)
+        return true
     }
 }
 

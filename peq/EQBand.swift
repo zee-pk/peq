@@ -39,6 +39,7 @@ struct EQBand: Codable, Identifiable, Equatable {
 struct EQSettings: Codable, Equatable {
     var bypass: Bool
     var outputGainDb: Double
+    var targetOutputDeviceUID: String?
     var bands: [EQBand]
 
     static func newBand(number: Int, frequencyHz: Double = 1_000) -> EQBand {
@@ -48,6 +49,7 @@ struct EQSettings: Codable, Equatable {
     static let flat = EQSettings(
         bypass: false,
         outputGainDb: -3,
+        targetOutputDeviceUID: nil,
         bands: [
             EQBand(name: "Band 1", frequencyHz: 105, bandwidth: 0.7),
             EQBand(name: "Band 2", frequencyHz: 1_000, bandwidth: 0.8),
@@ -58,6 +60,7 @@ struct EQSettings: Codable, Equatable {
     func sanitized() -> EQSettings {
         var copy = self
         copy.outputGainDb = EQLimits.clamp(copy.outputGainDb, to: EQLimits.outputGainDb)
+        copy.targetOutputDeviceUID = copy.targetOutputDeviceUID?.isEmpty == true ? nil : copy.targetOutputDeviceUID
 
         if copy.bands.isEmpty {
             copy.bands = EQSettings.flat.bands

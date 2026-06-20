@@ -12,8 +12,7 @@ struct PermissionView: View {
                         .fill(Color.orange.opacity(0.15))
                         .frame(width: 80, height: 80)
 
-                    Image(systemName: "waveform.badge.exclamationmark")
-                        .font(.system(size: 36, weight: .medium))
+                    MaterialIcon(name: MaterialIconName.permissions, size: 36)
                         .foregroundStyle(.orange)
                 }
 
@@ -34,7 +33,7 @@ struct PermissionView: View {
             // What's needed
             VStack(alignment: .leading, spacing: 12) {
                 permissionRow(
-                    icon: "music.note.list",
+                    icon: MaterialIconName.music,
                     color: .blue,
                     title: "System Audio Recording",
                     description: "Required to read and process system-wide audio output"
@@ -52,7 +51,7 @@ struct PermissionView: View {
                         await permissionManager.requestPermissions()
                     }
                 } label: {
-                    Label("Request Permission", systemImage: "hand.raised.fill")
+                    MaterialIconLabel(title: "Request Permission", icon: MaterialIconName.raiseHand)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -61,7 +60,7 @@ struct PermissionView: View {
                 Button {
                     permissionManager.openSystemSettings()
                 } label: {
-                    Label("Open System Settings", systemImage: "gearshape")
+                    MaterialIconLabel(title: "Open System Settings", icon: MaterialIconName.settings)
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -87,8 +86,7 @@ struct PermissionView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(color.opacity(0.15))
                     .frame(width: 36, height: 36)
-                Image(systemName: icon)
-                    .font(.system(size: 16, weight: .medium))
+                MaterialIcon(name: icon, size: 16)
                     .foregroundStyle(color)
             }
 
@@ -102,7 +100,7 @@ struct PermissionView: View {
 
             Spacer()
 
-            Image(systemName: "exclamationmark.circle.fill")
+            MaterialIcon(name: MaterialIconName.error)
                 .foregroundStyle(.orange)
         }
     }

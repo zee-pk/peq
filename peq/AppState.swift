@@ -11,6 +11,11 @@ final class AppState: ObservableObject {
     @Published private(set) var audioHealth = AudioHealthSnapshot.empty
     @Published var settings: EQSettings
     @Published private(set) var savedPresets: [String] = []
+    @Published private(set) var activePresetName: String?
+    @Published private(set) var isPresetModified = false
+    @Published private(set) var outputDevices: [OutputDevice] = []
+    @Published private(set) var currentOutputDeviceUID: String?
+    @Published private(set) var isVolumeHotkeyRemappingAvailable = false
 
     private let presetStore = PresetStore()
     private let deviceManager = DeviceManager()
@@ -23,6 +28,26 @@ final class AppState: ObservableObject {
     init() {
         self.settings = presetStore.load()
         self.savedPresets = presetStore.getSavedPresets()
+        self.activePresetName = UserDefaults.standard.string(forKey: "peq.activePresetName")
+        self.isPresetModified = UserDefaults.standard.bool(forKey: "peq.isPresetModified")
+        refreshOutputDevices()
+    }
+
+    var isConfiguredOutputDeviceActive: Bool {
+        guard let targetUID = settings.targetOutputDeviceUID else { return false }
+        return targetUID == currentOutputDeviceUID
+    }
+
+    var isEQEffective: Bool {
+        isProcessing && !settings.bypass && isConfiguredOutputDeviceActive
+    }
+
+    var volumeHotkeyStatusText: String {
+        guard isVolumeHotkeyRemappingAvailable else {
+            return "Unavailable"
+        }
+
+        return isEQEffective ? "EQ Gain" : "System Volume"
     }
 
     func refreshPresets() {
@@ -30,19 +55,39 @@ final class AppState: ObservableObject {
     }
 
     func savePreset(name: String) {
-        presetStore.savePreset(settings, name: name)
+        var presetToSave = settings
+        presetToSave.bypass = false
+        presetStore.savePreset(presetToSave, name: name)
+        activePresetName = name
+        isPresetModified = false
+        UserDefaults.standard.set(name, forKey: "peq.activePresetName")
+        UserDefaults.standard.set(false, forKey: "peq.isPresetModified")
         refreshPresets()
     }
 
     func loadPreset(name: String) {
         if let preset = presetStore.loadPreset(name: name) {
+            let currentBypass = settings.bypass
+            let currentTargetOutputDeviceUID = settings.targetOutputDeviceUID
             settings = preset
+            settings.bypass = currentBypass // Do not load/change bypass
+            settings.targetOutputDeviceUID = currentTargetOutputDeviceUID
+            activePresetName = name
+            isPresetModified = false
+            UserDefaults.standard.set(name, forKey: "peq.activePresetName")
+            UserDefaults.standard.set(false, forKey: "peq.isPresetModified")
             persistAndRebuildIfNeeded()
         }
     }
 
     func deletePreset(name: String) {
         presetStore.deletePreset(name: name)
+        if activePresetName == name {
+            activePresetName = nil
+            isPresetModified = false
+            UserDefaults.standard.removeObject(forKey: "peq.activePresetName")
+            UserDefaults.standard.set(false, forKey: "peq.isPresetModified")
+        }
         refreshPresets()
     }
 
@@ -86,10 +131,11 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "peq.isProcessing")
         if enabled {
             do {
-                try audioPipeline.start(settings: settings)
+                refreshOutputDevices()
+                try audioPipeline.start(settings: effectiveSettings())
                 isProcessing = true
                 hasError = false
-                statusText = "EQ audio path enabled"
+                updateStatusText()
             } catch {
                 isProcessing = false
                 hasError = true
@@ -109,9 +155,22 @@ final class AppState: ObservableObject {
         persistAndApply()
     }
 
+    func setTargetOutputDeviceUID(_ uid: String?) {
+        guard settings.targetOutputDeviceUID != uid else { return }
+        settings.targetOutputDeviceUID = uid
+        markModified()
+        refreshOutputDevices()
+        persistAndApply()
+    }
+
     func setOutputGain(_ gainDb: Double) {
         settings.outputGainDb = EQLimits.clamp(gainDb, to: EQLimits.outputGainDb)
+        markModified()
         persistAndApply()
+    }
+
+    func adjustOutputGain(by deltaDb: Double) {
+        setOutputGain(settings.outputGainDb + deltaDb)
     }
 
     func updateBand(_ band: EQBand) {
@@ -124,11 +183,13 @@ final class AppState: ObservableObject {
         sanitizedBand.gainDb = EQLimits.clamp(sanitizedBand.gainDb, to: EQLimits.bandGainDb)
         sanitizedBand.bandwidth = EQLimits.clamp(sanitizedBand.bandwidth, to: EQLimits.bandwidth)
         settings.bands[index] = sanitizedBand
+        markModified()
         persistAndApply()
     }
 
     func addBand() {
         settings.bands.append(EQSettings.newBand(number: settings.bands.count + 1))
+        markModified()
         persistAndRebuildIfNeeded()
     }
 
@@ -136,36 +197,119 @@ final class AppState: ObservableObject {
         guard settings.bands.count > 1 else { return }
         settings.bands.removeAll { $0.id == band.id }
         renumberBands()
+        markModified()
         persistAndRebuildIfNeeded()
     }
 
+    func moveBand(_ band: EQBand, by offset: Int) {
+        guard let currentIndex = settings.bands.firstIndex(where: { $0.id == band.id }) else { return }
+
+        let nextIndex = currentIndex + offset
+        guard settings.bands.indices.contains(nextIndex) else { return }
+
+        settings.bands.swapAt(currentIndex, nextIndex)
+        renumberBands()
+        markModified()
+        persistAndApply()
+    }
+
+    func moveBand(withID bandID: UUID, before targetBandID: UUID?) {
+        guard let sourceIndex = settings.bands.firstIndex(where: { $0.id == bandID }) else { return }
+
+        let destinationIndex: Int
+        if let targetBandID {
+            guard let targetIndex = settings.bands.firstIndex(where: { $0.id == targetBandID }) else { return }
+            destinationIndex = targetIndex
+        } else {
+            destinationIndex = settings.bands.endIndex
+        }
+
+        let adjustedDestination = sourceIndex < destinationIndex ? destinationIndex - 1 : destinationIndex
+        guard adjustedDestination != sourceIndex else { return }
+
+        let movedBand = settings.bands.remove(at: sourceIndex)
+        settings.bands.insert(movedBand, at: adjustedDestination)
+        renumberBands()
+        markModified()
+        persistAndApply()
+    }
+
     func resetDefaults() {
+        let oldBypass = settings.bypass
+        let oldTargetOutputDeviceUID = settings.targetOutputDeviceUID
         settings = .flat
+        settings.bypass = oldBypass
+        settings.targetOutputDeviceUID = oldTargetOutputDeviceUID
+        activePresetName = nil
+        isPresetModified = false
+        UserDefaults.standard.removeObject(forKey: "peq.activePresetName")
+        UserDefaults.standard.set(false, forKey: "peq.isPresetModified")
         persistAndRebuildIfNeeded()
+    }
+
+    func setVolumeHotkeyRemappingAvailable(_ available: Bool) {
+        isVolumeHotkeyRemappingAvailable = available
+    }
+
+    private func markModified() {
+        if !isPresetModified && activePresetName != nil {
+            isPresetModified = true
+            UserDefaults.standard.set(true, forKey: "peq.isPresetModified")
+        }
     }
 
     private func persistAndApply() {
         presetStore.save(settings)
-        audioPipeline.apply(settings)
+        audioPipeline.apply(effectiveSettings())
+        updateStatusText()
     }
 
     private func persistAndRebuildIfNeeded() {
         presetStore.save(settings)
 
         guard isProcessing else {
-            audioPipeline.apply(settings)
+            audioPipeline.apply(effectiveSettings())
+            updateStatusText()
             return
         }
 
         do {
             statusText = "Rebuilding audio path"
-            try audioPipeline.start(settings: settings)
+            try audioPipeline.start(settings: effectiveSettings())
             hasError = false
-            statusText = "EQ audio path enabled"
+            updateStatusText()
         } catch {
             isProcessing = false
             hasError = true
             statusText = error.localizedDescription
+        }
+    }
+
+    private func refreshOutputDevices() {
+        outputDevices = deviceManager.outputDevices()
+        currentOutputDeviceUID = try? deviceManager.defaultOutputDeviceUID()
+        updateStatusText()
+    }
+
+    private func effectiveSettings() -> EQSettings {
+        var effective = settings
+        effective.bypass = settings.bypass || !isConfiguredOutputDeviceActive
+        return effective
+    }
+
+    private func updateStatusText() {
+        guard !hasError else { return }
+
+        if !isProcessing {
+            statusText = "Stopped"
+        } else if settings.targetOutputDeviceUID == nil {
+            statusText = "Select an output device to enable EQ"
+        } else if !isConfiguredOutputDeviceActive {
+            statusText = "EQ bypassed for current output device"
+        } else if settings.bypass {
+            statusText = "EQ bypassed"
+        } else {
+            statusText = "EQ audio path enabled"
         }
     }
 
@@ -176,6 +320,7 @@ final class AppState: ObservableObject {
     }
 
     private func handleDeviceChange(reason: AudioDeviceChangeReason) {
+        refreshOutputDevices()
         guard isProcessing, !isRebuildingAudioPath else { return }
 
         isRebuildingAudioPath = true
@@ -190,7 +335,9 @@ final class AppState: ObservableObject {
                 case .success:
                     self.isProcessing = true
                     self.hasError = false
-                    self.statusText = "EQ audio path enabled"
+                    self.refreshOutputDevices()
+                    self.audioPipeline.apply(self.effectiveSettings())
+                    self.updateStatusText()
                 case .failure(let error):
                     self.isProcessing = false
                     self.hasError = true

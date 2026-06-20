@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import IOKit.hidsystem
 import SwiftUI
 import ServiceManagement
 
@@ -22,6 +23,7 @@ struct peqApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusController: StatusBarController?
+    private var volumeHotkeyMonitor: VolumeHotkeyMonitor?
     private let appState = AppState()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -35,6 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         statusController = StatusBarController(appState: appState)
+        volumeHotkeyMonitor = VolumeHotkeyMonitor(appState: appState)
+        volumeHotkeyMonitor?.start()
         
         Task {
             await PermissionManager.shared.checkPermissions()
@@ -84,7 +88,11 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         super.init()
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "peq")
+            button.image = MaterialIconImage.make(
+                MaterialIconName.status,
+                size: 18,
+                accessibilityDescription: "peq"
+            )
             button.target = self
             button.action = #selector(toggleWindow(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -257,5 +265,108 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
         return false
+    }
+}
+
+@MainActor
+private final class VolumeHotkeyMonitor {
+    private weak var appState: AppState?
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+
+    init(appState: AppState) {
+        self.appState = appState
+    }
+
+    func start() {
+        guard eventTap == nil else { return }
+
+        guard let systemDefinedEventType = CGEventType(rawValue: UInt32(NSEvent.EventType.systemDefined.rawValue)) else {
+            appState?.setVolumeHotkeyRemappingAvailable(false)
+            return
+        }
+        let eventMask = CGEventMask(1 << systemDefinedEventType.rawValue)
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            guard let refcon else { return Unmanaged.passUnretained(event) }
+
+            let monitor = Unmanaged<VolumeHotkeyMonitor>
+                .fromOpaque(refcon)
+                .takeUnretainedValue()
+
+            return MainActor.assumeIsolated {
+                monitor.handle(event: event)
+            }
+        }
+
+        let refcon = Unmanaged.passUnretained(self).toOpaque()
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: eventMask,
+            callback: callback,
+            userInfo: refcon
+        ) else {
+            NSLog("peq volume hotkey event tap unavailable")
+            appState?.setVolumeHotkeyRemappingAvailable(false)
+            return
+        }
+
+        eventTap = tap
+        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        if let runLoopSource {
+            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        appState?.setVolumeHotkeyRemappingAvailable(true)
+    }
+
+    func stop() {
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        }
+
+        runLoopSource = nil
+        eventTap = nil
+        appState?.setVolumeHotkeyRemappingAvailable(false)
+    }
+
+    private func handle(event: CGEvent) -> Unmanaged<CGEvent>? {
+        if event.type == .tapDisabledByTimeout || event.type == .tapDisabledByUserInput {
+            if let eventTap {
+                CGEvent.tapEnable(tap: eventTap, enable: true)
+                appState?.setVolumeHotkeyRemappingAvailable(true)
+            } else {
+                appState?.setVolumeHotkeyRemappingAvailable(false)
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard let nsEvent = NSEvent(cgEvent: event),
+              nsEvent.subtype.rawValue == 8,
+              let appState,
+              appState.isEQEffective else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let keyCode = (nsEvent.data1 & 0xFFFF0000) >> 16
+        let keyFlags = nsEvent.data1 & 0x0000FFFF
+        let isKeyDown = ((keyFlags & 0xFF00) >> 8) == 0xA
+        guard isKeyDown else { return nil }
+
+        switch Int32(keyCode) {
+        case NX_KEYTYPE_SOUND_UP:
+            appState.adjustOutputGain(by: 0.5)
+            return nil
+        case NX_KEYTYPE_SOUND_DOWN:
+            appState.adjustOutputGain(by: -0.5)
+            return nil
+        default:
+            return Unmanaged.passUnretained(event)
+        }
     }
 }
