@@ -214,10 +214,6 @@ struct ContentView: View {
                     // Bands Section
                     VStack(alignment: .leading, spacing: 16) {
                         HStack {
-                            MaterialIconLabel(title: "Equalizer Bands", icon: MaterialIconName.tune)
-                                .font(.headline)
-                                .foregroundStyle(.primary)
-                            
                             Spacer()
                             
                             Button {
