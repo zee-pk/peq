@@ -348,22 +348,35 @@ private final class VolumeHotkeyMonitor {
 
         guard let nsEvent = NSEvent(cgEvent: event),
               nsEvent.subtype.rawValue == 8,
-              let appState,
-              appState.isEQEffective else {
+              let appState else {
             return Unmanaged.passUnretained(event)
         }
 
         let keyCode = (nsEvent.data1 & 0xFFFF0000) >> 16
+        switch Int32(keyCode) {
+        case NX_KEYTYPE_SOUND_UP, NX_KEYTYPE_SOUND_DOWN, NX_KEYTYPE_MUTE:
+            break
+        default:
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard appState.isOutputGainControlActive else {
+            return Unmanaged.passUnretained(event)
+        }
+
         let keyFlags = nsEvent.data1 & 0x0000FFFF
         let isKeyDown = ((keyFlags & 0xFF00) >> 8) == 0xA
-        guard isKeyDown else { return nil }
+        guard isKeyDown else { return Unmanaged.passUnretained(event) }
 
         switch Int32(keyCode) {
         case NX_KEYTYPE_SOUND_UP:
-            appState.adjustOutputGain(by: 0.5)
+            appState.adjustOutputGain(by: 1)
             return nil
         case NX_KEYTYPE_SOUND_DOWN:
-            appState.adjustOutputGain(by: -0.5)
+            appState.adjustOutputGain(by: -1)
+            return nil
+        case NX_KEYTYPE_MUTE:
+            appState.setOutputGain(EQLimits.outputGainDb.lowerBound)
             return nil
         default:
             return Unmanaged.passUnretained(event)

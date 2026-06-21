@@ -1,7 +1,7 @@
 import Foundation
 
 enum EQLimits {
-    static let outputGainDb = -24.0...0.0
+    static let outputGainDb = -30.0...0.0
     static let bandGainDb = -24.0...12.0
     static let frequencyHz = 20.0...20_000.0
     static let bandwidth = 0.05...5.0
@@ -40,6 +40,7 @@ struct EQSettings: Codable, Equatable {
     var bypass: Bool
     var outputGainDb: Double
     var targetOutputDeviceUID: String?
+    var targetOutputDeviceName: String?
     var bands: [EQBand]
 
     static func newBand(number: Int, frequencyHz: Double = 1_000) -> EQBand {
@@ -50,6 +51,7 @@ struct EQSettings: Codable, Equatable {
         bypass: false,
         outputGainDb: -3,
         targetOutputDeviceUID: nil,
+        targetOutputDeviceName: nil,
         bands: [
             EQBand(name: "Band 1", frequencyHz: 105, bandwidth: 0.7),
             EQBand(name: "Band 2", frequencyHz: 1_000, bandwidth: 0.8),
@@ -61,6 +63,11 @@ struct EQSettings: Codable, Equatable {
         var copy = self
         copy.outputGainDb = EQLimits.clamp(copy.outputGainDb, to: EQLimits.outputGainDb)
         copy.targetOutputDeviceUID = copy.targetOutputDeviceUID?.isEmpty == true ? nil : copy.targetOutputDeviceUID
+        copy.targetOutputDeviceName = copy.targetOutputDeviceName?.isEmpty == true ? nil : copy.targetOutputDeviceName
+
+        if copy.targetOutputDeviceUID == nil {
+            copy.targetOutputDeviceName = nil
+        }
 
         if copy.bands.isEmpty {
             copy.bands = EQSettings.flat.bands

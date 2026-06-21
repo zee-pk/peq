@@ -133,19 +133,17 @@ struct ContentView: View {
                                     )
                                 ) {
                                     Text("Select output device").tag("")
-                                    ForEach(appState.outputDevices) { device in
-                                        Text(device.name).tag(device.id)
+                                    ForEach(appState.selectedOutputDevicePickerItems) { device in
+                                        Text(device.name)
+                                            .foregroundStyle(device.isAvailable ? .primary : .secondary)
+                                            .tag(device.id)
                                     }
                                 }
                                 .labelsHidden()
                                 .frame(maxWidth: .infinity)
 
-                                if appState.settings.targetOutputDeviceUID == nil {
-                                    Text("Select the output device peq should follow.")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                } else if !appState.isConfiguredOutputDeviceActive {
-                                    Text("EQ is bypassed until this device is the default output.")
+                                if let caption = appState.outputDeviceSelectionCaption {
+                                    Text(caption)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -157,7 +155,7 @@ struct ContentView: View {
                                             set: { appState.setOutputGain($0) }
                                         ),
                                         in: EQLimits.outputGainDb,
-                                        step: 0.5
+                                        step: 1.0
                                     )
                                     
                                     HStack(spacing: 4) {
@@ -192,16 +190,6 @@ struct ContentView: View {
                                     .foregroundStyle(.primary)
                                 
                                 AudioHealthView(health: appState.audioHealth, isProcessing: appState.isProcessing)
-
-                                HStack(spacing: 4) {
-                                    Text("Media Keys")
-                                        .foregroundStyle(.tertiary)
-                                    Spacer()
-                                    Text(appState.volumeHotkeyStatusText)
-                                        .monospacedDigit()
-                                        .foregroundStyle(.primary)
-                                }
-                                .font(.caption)
                                 
                                 Spacer()
                             }
@@ -357,13 +345,12 @@ private struct AudioHealthView: View {
             GridRow {
                 healthItem("Tap SR", sampleRateText(health.tapSampleRate))
                 healthItem("Out SR", sampleRateText(health.outputSampleRate))
-                healthItem("Fill", "\(health.bufferFillFrames)")
+                healthItem("Out Pk", peakText(health.outputPeak))
             }
 
             GridRow {
-                healthItem("Pre", dbText(Float(health.effectivePreampDb)))
-                healthItem("In Pk", peakText(health.capturedPeak))
-                healthItem("Out Pk", peakText(health.outputPeak))
+                healthItem("Tap BD", bitDepthText(health.tapBitDepth))
+                healthItem("Out BD", bitDepthText(health.outputBitDepth))
             }
         }
         .font(.caption)
@@ -392,8 +379,9 @@ private struct AudioHealthView: View {
         return String(format: "%.1f dB", db)
     }
 
-    private func dbText(_ value: Float) -> String {
-        String(format: "%.1f dB", value)
+    private func bitDepthText(_ bitDepth: Int) -> String {
+        guard bitDepth > 0 else { return "-" }
+        return "\(bitDepth)-bit"
     }
 }
 

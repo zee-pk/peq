@@ -15,6 +15,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isPresetModified = false
     @Published private(set) var outputDevices: [OutputDevice] = []
     @Published private(set) var currentOutputDeviceUID: String?
+    @Published private(set) var isSavedTargetOutputDeviceMissing = false
     @Published private(set) var isVolumeHotkeyRemappingAvailable = false
 
     private let presetStore = PresetStore()
@@ -34,7 +35,8 @@ final class AppState: ObservableObject {
     }
 
     var isConfiguredOutputDeviceActive: Bool {
-        guard let targetUID = settings.targetOutputDeviceUID else { return false }
+        guard !isSavedTargetOutputDeviceMissing,
+              let targetUID = settings.targetOutputDeviceUID else { return false }
         return targetUID == currentOutputDeviceUID
     }
 
@@ -42,12 +44,48 @@ final class AppState: ObservableObject {
         isProcessing && !settings.bypass && isConfiguredOutputDeviceActive
     }
 
-    var volumeHotkeyStatusText: String {
-        guard isVolumeHotkeyRemappingAvailable else {
-            return "Unavailable"
+    var isOutputGainControlActive: Bool {
+        isProcessing && !settings.bypass && isVolumeHotkeyRemappingAvailable
+    }
+
+    var selectedOutputDevicePickerItems: [OutputDevicePickerItem] {
+        var items = outputDevices.map {
+            OutputDevicePickerItem(id: $0.id, name: $0.name, isAvailable: true)
         }
 
-        return isEQEffective ? "EQ Gain" : "System Volume"
+        if let unavailableItem = unavailableSelectedOutputDevicePickerItem {
+            items.append(unavailableItem)
+        }
+
+        return items
+    }
+
+    var unavailableSelectedOutputDevicePickerItem: OutputDevicePickerItem? {
+        guard isSavedTargetOutputDeviceMissing, let targetUID = settings.targetOutputDeviceUID else {
+            return nil
+        }
+
+        return OutputDevicePickerItem(
+            id: targetUID,
+            name: settings.targetOutputDeviceName ?? "Unavailable output device",
+            isAvailable: false
+        )
+    }
+
+    var outputDeviceSelectionCaption: String? {
+        guard settings.targetOutputDeviceUID != nil else {
+            return "Select the Target output device."
+        }
+
+        if isSavedTargetOutputDeviceMissing {
+            return nil
+        }
+
+        if !isConfiguredOutputDeviceActive {
+            return "EQ bands are bypassed until this device is the default output."
+        }
+
+        return nil
     }
 
     func refreshPresets() {
@@ -69,9 +107,11 @@ final class AppState: ObservableObject {
         if let preset = presetStore.loadPreset(name: name) {
             let currentBypass = settings.bypass
             let currentTargetOutputDeviceUID = settings.targetOutputDeviceUID
+            let currentTargetOutputDeviceName = settings.targetOutputDeviceName
             settings = preset
             settings.bypass = currentBypass // Do not load/change bypass
             settings.targetOutputDeviceUID = currentTargetOutputDeviceUID
+            settings.targetOutputDeviceName = currentTargetOutputDeviceName
             activePresetName = name
             isPresetModified = false
             UserDefaults.standard.set(name, forKey: "peq.activePresetName")
@@ -158,6 +198,7 @@ final class AppState: ObservableObject {
     func setTargetOutputDeviceUID(_ uid: String?) {
         guard settings.targetOutputDeviceUID != uid else { return }
         settings.targetOutputDeviceUID = uid
+        settings.targetOutputDeviceName = outputDevices.first(where: { $0.id == uid })?.name
         markModified()
         refreshOutputDevices()
         persistAndApply()
@@ -237,9 +278,11 @@ final class AppState: ObservableObject {
     func resetDefaults() {
         let oldBypass = settings.bypass
         let oldTargetOutputDeviceUID = settings.targetOutputDeviceUID
+        let oldTargetOutputDeviceName = settings.targetOutputDeviceName
         settings = .flat
         settings.bypass = oldBypass
         settings.targetOutputDeviceUID = oldTargetOutputDeviceUID
+        settings.targetOutputDeviceName = oldTargetOutputDeviceName
         activePresetName = nil
         isPresetModified = false
         UserDefaults.standard.removeObject(forKey: "peq.activePresetName")
@@ -288,6 +331,12 @@ final class AppState: ObservableObject {
     private func refreshOutputDevices() {
         outputDevices = deviceManager.outputDevices()
         currentOutputDeviceUID = try? deviceManager.defaultOutputDeviceUID()
+        if let targetUID = settings.targetOutputDeviceUID {
+            isSavedTargetOutputDeviceMissing = !outputDevices.contains { $0.id == targetUID }
+        } else {
+            isSavedTargetOutputDeviceMissing = false
+        }
+        syncPersistedTargetOutputDeviceName()
         updateStatusText()
     }
 
@@ -303,14 +352,32 @@ final class AppState: ObservableObject {
         if !isProcessing {
             statusText = "Stopped"
         } else if settings.targetOutputDeviceUID == nil {
-            statusText = "Select an output device to enable EQ"
+            statusText = "Select an output device to enable EQ bands"
+        } else if isSavedTargetOutputDeviceMissing {
+            statusText = "Saved output device unavailable; EQ bands bypassed"
         } else if !isConfiguredOutputDeviceActive {
-            statusText = "EQ bypassed for current output device"
+            statusText = "EQ bands bypassed until selected device is the default output"
         } else if settings.bypass {
             statusText = "EQ bypassed"
         } else {
             statusText = "EQ audio path enabled"
         }
+    }
+
+    private func syncPersistedTargetOutputDeviceName() {
+        guard let uid = settings.targetOutputDeviceUID else {
+            if settings.targetOutputDeviceName != nil {
+                settings.targetOutputDeviceName = nil
+                presetStore.save(settings)
+            }
+            return
+        }
+
+        guard let device = outputDevices.first(where: { $0.id == uid }) else { return }
+        guard settings.targetOutputDeviceName != device.name else { return }
+
+        settings.targetOutputDeviceName = device.name
+        presetStore.save(settings)
     }
 
     private func renumberBands() {
@@ -346,4 +413,10 @@ final class AppState: ObservableObject {
             }
         }
     }
+}
+
+struct OutputDevicePickerItem: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let isAvailable: Bool
 }
