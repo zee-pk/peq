@@ -88,11 +88,12 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         super.init()
 
         if let button = statusItem.button {
-            button.image = MaterialIconImage.make(
-                MaterialIconName.status,
-                size: 18,
+            let image = NSImage(
+                systemSymbolName: "slider.horizontal.3",
                 accessibilityDescription: "peq"
-            )
+            )?.withSymbolConfiguration(.init(pointSize: 18, weight: .regular))
+            image?.isTemplate = true
+            button.image = image
             button.target = self
             button.action = #selector(toggleWindow(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])

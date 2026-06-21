@@ -44,7 +44,7 @@ struct ContentView: View {
                             showingSavePreset = true
                         }
                     } label: {
-                        MaterialIconLabel(title: "Presets", icon: MaterialIconName.menu)
+                        Label("Presets", systemImage: "list.bullet")
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
@@ -59,7 +59,7 @@ struct ContentView: View {
                                 Button {
                                     appState.savePreset(name: activePreset)
                                 } label: {
-                                    MaterialIcon(name: MaterialIconName.save)
+                                    Image(systemName: "square.and.arrow.down")
                                         .help("Save changes to preset")
                                 }
                                 .buttonStyle(.plain)
@@ -94,7 +94,7 @@ struct ContentView: View {
             // Status / Error Banner
             if appState.hasError {
                 HStack(spacing: 10) {
-                    MaterialIcon(name: MaterialIconName.warning, size: 20)
+                    Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                     Text(appState.statusText)
                         .font(.callout)
@@ -121,7 +121,7 @@ struct ContentView: View {
                         // Output Gain Group
                         GroupBox {
                             VStack(alignment: .leading, spacing: 12) {
-                                MaterialIconLabel(title: "Output Gain", icon: MaterialIconName.output)
+                                Label("Output Gain", systemImage: "speaker.wave.3.fill")
                                     .font(.headline)
                                     .foregroundStyle(.primary)
 
@@ -185,7 +185,7 @@ struct ContentView: View {
                         // Audio Health Group
                         GroupBox {
                             VStack(alignment: .leading, spacing: 12) {
-                                MaterialIconLabel(title: "Audio Health", icon: MaterialIconName.health)
+                                Label("Audio Health", systemImage: "waveform.path.ecg")
                                     .font(.headline)
                                     .foregroundStyle(.primary)
                                 
@@ -209,7 +209,7 @@ struct ContentView: View {
                                     appState.addBand()
                                 }
                             } label: {
-                                MaterialIconLabel(title: "Add Band", icon: MaterialIconName.addCircle)
+                                Label("Add Band", systemImage: "plus.circle.fill")
                             }
                             .buttonStyle(.plain)
                             .foregroundStyle(Color.accentColor)
@@ -409,7 +409,7 @@ private struct BandRow: View {
 
                 HStack(spacing: 8) {
                     Button(action: onMoveUp) {
-                        MaterialIcon(name: MaterialIconName.arrowUp)
+                        Image(systemName: "chevron.up")
                     }
                     .buttonStyle(.plain)
                     .disabled(!canMoveUp)
@@ -417,7 +417,7 @@ private struct BandRow: View {
                     .help("Move band up")
 
                     Button(action: onMoveDown) {
-                        MaterialIcon(name: MaterialIconName.arrowDown)
+                        Image(systemName: "chevron.down")
                     }
                     .buttonStyle(.plain)
                     .disabled(!canMoveDown)
