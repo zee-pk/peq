@@ -5,12 +5,15 @@ import Darwin
 import SwiftUI
 
 enum SpectrumAnalyzerTuning {
-    static let fftSize = 8_192
-    static let snapshotHopFrames = 512
-    static let refreshInterval = DispatchTimeInterval.milliseconds(16)
+    // 4,096 samples is ~85 ms at 48 kHz: materially less latency while retaining useful bass resolution.
+    static let fftSize = 4_096
+    static let snapshotHopFrames = 256
+    static let refreshInterval = DispatchTimeInterval.milliseconds(8)
     static let defaultBandFallDbPerSecond = 45.0
     static let defaultPeakFallDbPerSecond = 18.0
-    static let fallRateRange: ClosedRange<Double> = 1...480
+    static let fallRateRange: ClosedRange<Double> = 1...240
+    static let defaultBandSeparation = 0.35
+    static let bandSeparationRange: ClosedRange<Double> = 0...0.8
 }
 
 struct SpectrumSnapshot: Equatable {
@@ -60,6 +63,7 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
     private let generation = ManagedAtomic<Int64>(0)
     private let bandFallDbPerSecond = AtomicFloat(Float(SpectrumAnalyzerTuning.defaultBandFallDbPerSecond))
     private let peakFallDbPerSecond = AtomicFloat(Float(SpectrumAnalyzerTuning.defaultPeakFallDbPerSecond))
+    private let bandSeparation = AtomicFloat(Float(SpectrumAnalyzerTuning.defaultBandSeparation))
     private let historyLeft: UnsafeMutablePointer<Float>
     private let historyRight: UnsafeMutablePointer<Float>
     private let snapshotSlots: [SpectrumSnapshotSlot]
@@ -131,6 +135,11 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
         let range = SpectrumAnalyzerTuning.fallRateRange
         self.bandFallDbPerSecond.store(Float(min(max(bandFallDbPerSecond, range.lowerBound), range.upperBound)))
         self.peakFallDbPerSecond.store(Float(min(max(peakFallDbPerSecond, range.lowerBound), range.upperBound)))
+    }
+
+    func setBandSeparation(_ value: Double) {
+        let range = SpectrumAnalyzerTuning.bandSeparationRange
+        bandSeparation.store(Float(min(max(value, range.lowerBound), range.upperBound)))
     }
 
     /// Called by the post-EQ mixer tap. No allocations, dispatching, or FFT work occur here.
@@ -265,24 +274,47 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
         var split = DSPSplitComplex(realp: real, imagp: imaginary)
         vDSP_fft_zip(fftSetup, &split, 1, vDSP_Length(log2(Float(fftSize))), FFTDirection(FFT_FORWARD))
         vDSP_zvmags(&split, 1, magnitudes, 1, vDSP_Length(fftSize / 2))
-        var bars = Array(repeating: SpectrumSnapshot.floorDb, count: SpectrumSnapshot.barCount)
+        var amplitudes = Array(repeating: Float.zero, count: SpectrumSnapshot.barCount)
         let nyquist = sampleRate / 2
-        guard nyquist > 20 else { return bars }
+        guard nyquist > 20 else { return Array(repeating: SpectrumSnapshot.floorDb, count: SpectrumSnapshot.barCount) }
         let amplitudeScale = 2 / windowSum
 
-        for bar in bars.indices {
-            let centerFrequency = 20 * powf(1_000, (Float(bar) + 0.5) / Float(bars.count))
+        for bar in amplitudes.indices {
+            let centerFrequency = 20 * powf(1_000, (Float(bar) + 0.5) / Float(amplitudes.count))
             guard centerFrequency <= nyquist else { continue }
             let exactBin = centerFrequency * Float(fftSize) / sampleRate
             let lowerBin = max(1, min((fftSize / 2) - 1, Int(floor(exactBin))))
             let upperBin = min((fftSize / 2) - 1, lowerBin + 1)
-            let fraction = exactBin - Float(lowerBin)
+            let fraction = min(1, max(0, exactBin - Float(lowerBin)))
             let lowerMagnitude = sqrtf(magnitudes[lowerBin])
             let upperMagnitude = sqrtf(magnitudes[upperBin])
-            let amplitude = ((lowerMagnitude + ((upperMagnitude - lowerMagnitude) * fraction)) * amplitudeScale)
-            bars[bar] = min(SpectrumSnapshot.ceilingDb, max(SpectrumSnapshot.floorDb, 20 * log10f(max(amplitude, 0.000_000_03))))
+            amplitudes[bar] = (lowerMagnitude + ((upperMagnitude - lowerMagnitude) * fraction)) * amplitudeScale
         }
-        return bars
+        let separatedAmplitudes = applyBandSeparation(to: amplitudes)
+        return separatedAmplitudes.map {
+            min(SpectrumSnapshot.ceilingDb, max(SpectrumSnapshot.floorDb, 20 * log10f(max($0, 0.000_000_03))))
+        }
+    }
+
+    /// A bounded linear-amplitude neighbor subtraction reduces bleed without boosting measured amplitudes.
+    private func applyBandSeparation(to amplitudes: [Float]) -> [Float] {
+        let amount = bandSeparation.load()
+        guard amount > 0, amplitudes.count > 1 else { return amplitudes }
+        var separated = amplitudes
+        for index in amplitudes.indices {
+            let neighborAverage: Float
+            if index == 0 {
+                neighborAverage = amplitudes[1]
+            } else if index == amplitudes.index(before: amplitudes.endIndex) {
+                neighborAverage = amplitudes[index - 1]
+            } else {
+                neighborAverage = (amplitudes[index - 1] + amplitudes[index + 1]) * 0.5
+            }
+            let retentionFloor = amplitudes[index] * (1 - amount)
+            let attenuated = amplitudes[index] - (amount * neighborAverage)
+            separated[index] = min(amplitudes[index], max(retentionFloor, max(0, attenuated)))
+        }
+        return separated
     }
 }
 
@@ -301,17 +333,31 @@ struct SpectrumAnalyzerView: View {
                         Text("POST-EQ SPECTRUM")
                             .font(.system(size: 13, weight: .bold, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.9))
-                        Text(appState.isProcessing ? "Output mixer · 20 Hz – 20 kHz" : "Enable EQ to analyze output")
+                        Text(appState.isProcessing ? "Output mixer · 20 Hz – 20 kHz · 4,096-point FFT" : "Enable EQ to analyze output")
                             .font(.caption.monospaced())
                             .foregroundStyle(.white.opacity(0.55))
+                        Text(String(
+                            format: "Analyzer %.0f · Delivery %.0f · Metal %.0f fps",
+                            appState.spectrumPerformance.analyzerFPS,
+                            appState.spectrumPerformance.deliveryFPS,
+                            appState.spectrumPerformance.renderFPS
+                        ))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.45))
                     }
                     Spacer()
                 }
                 .padding(.horizontal, 28)
                 .padding(.top, 22)
 
-                SpectrumChannelView(name: "LEFT", values: appState.spectrum.left, peaks: appState.spectrum.leftPeaks, dbTicks: dbTicks, frequencyTicks: frequencyTicks)
-                SpectrumChannelView(name: "RIGHT", values: appState.spectrum.right, peaks: appState.spectrum.rightPeaks, dbTicks: dbTicks, frequencyTicks: frequencyTicks)
+                ZStack {
+                    SpectrumMetalView(snapshot: appState.spectrum) { fps in
+                        appState.reportSpectrumRenderFPS(fps)
+                    }
+                    SpectrumPlotLabels(dbTicks: dbTicks, frequencyTicks: frequencyTicks)
+                        .allowsHitTesting(false)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .padding(.bottom, 28)
 
@@ -332,51 +378,35 @@ struct SpectrumAnalyzerView: View {
     }
 }
 
-private struct SpectrumChannelView: View {
-    let name: String
-    let values: [Float]
-    let peaks: [Float]
+private struct SpectrumPlotLabels: View {
     let dbTicks: [Float]
     let frequencyTicks: [(Float, String)]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(name)
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundStyle(.cyan)
-                .padding(.horizontal, 28)
-            Canvas { context, size in
-                let labelWidth: CGFloat = 42
-                let plot = CGRect(x: labelWidth, y: 4, width: size.width - labelWidth - 24, height: size.height - 26)
-                for tick in dbTicks {
-                    let y = yPosition(tick, in: plot)
-                    var grid = Path()
-                    grid.move(to: CGPoint(x: plot.minX, y: y))
-                    grid.addLine(to: CGPoint(x: plot.maxX, y: y))
-                    context.stroke(grid, with: .color(.white.opacity(0.16)), lineWidth: 1)
-                    context.draw(Text("\(Int(tick))").font(.system(size: 10, design: .monospaced)).foregroundColor(.white.opacity(0.55)), at: CGPoint(x: 0, y: y - 6), anchor: .topLeading)
+        GeometryReader { geometry in
+            let plots = SpectrumPlotLayout.plotRects(in: geometry.size)
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(plots.enumerated()), id: \.offset) { channel, plot in
+                    Text(channel == 0 ? "LEFT" : "RIGHT")
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.cyan)
+                        .position(x: 48, y: plot.minY - 12)
+
+                    ForEach(dbTicks, id: \.self) { tick in
+                        Text("\(Int(tick))")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.55))
+                            .position(x: 48, y: yPosition(tick, in: plot))
+                    }
+
+                    ForEach(Array(frequencyTicks.enumerated()), id: \.offset) { _, frequencyTick in
+                        Text(frequencyTick.1)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.55))
+                            .position(x: xPosition(frequencyTick.0, in: plot), y: plot.maxY + 12)
+                    }
                 }
-                for (frequency, label) in frequencyTicks {
-                    let x = xPosition(frequency, in: plot)
-                    var grid = Path()
-                    grid.move(to: CGPoint(x: x, y: plot.minY))
-                    grid.addLine(to: CGPoint(x: x, y: plot.maxY))
-                    context.stroke(grid, with: .color(.white.opacity(0.1)), lineWidth: 1)
-                    context.draw(Text(label).font(.system(size: 10, design: .monospaced)).foregroundColor(.white.opacity(0.55)), at: CGPoint(x: x, y: plot.maxY + 5), anchor: .top)
-                }
-                let width = plot.width / CGFloat(max(values.count, 1))
-                for index in values.indices {
-                    let x = plot.minX + CGFloat(index) * width + 1
-                    let y = yPosition(values[index], in: plot)
-                    let bar = CGRect(x: x, y: y, width: max(1, width - 2), height: plot.maxY - y)
-                    context.fill(Path(roundedRect: bar, cornerRadius: 1), with: .linearGradient(Gradient(colors: [.cyan, .blue.opacity(0.72)]), startPoint: CGPoint(x: bar.midX, y: bar.minY), endPoint: CGPoint(x: bar.midX, y: bar.maxY)))
-                    let peakY = yPosition(peaks[index], in: plot)
-                    context.fill(Path(CGRect(x: x, y: peakY, width: max(1, width - 2), height: 2)), with: .color(.white))
-                }
-                context.stroke(Path(plot), with: .color(.white.opacity(0.32)), lineWidth: 1)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, 28)
         }
     }
 

@@ -211,6 +211,13 @@ struct ContentView: View {
                                         set: { appState.setSpectrumPeakFallDbPerSecond($0) }
                                     )
                                 )
+
+                                SpectrumSeparationControl(
+                                    value: Binding(
+                                        get: { appState.spectrumBandSeparation },
+                                        set: { appState.setSpectrumBandSeparation($0) }
+                                    )
+                                )
                                 
                                 Spacer()
                             }
@@ -381,6 +388,37 @@ private struct SpectrumFallRateControl: View {
                     width: 52
                 )
                 Text("dB/s")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 30, alignment: .leading)
+            }
+        }
+    }
+}
+
+private struct SpectrumSeparationControl: View {
+    let value: Binding<Double>
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Band separation")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                Slider(
+                    value: value,
+                    in: SpectrumAnalyzerTuning.bandSeparationRange,
+                    step: 0.05
+                )
+                NumberField(
+                    value: value,
+                    range: SpectrumAnalyzerTuning.bandSeparationRange,
+                    step: 0.05,
+                    fractionDigits: 2,
+                    width: 52
+                )
+                Text("amount")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(width: 30, alignment: .leading)

@@ -2,6 +2,86 @@ import AppKit
 import Combine
 import Foundation
 
+struct SpectrumPerformanceSnapshot: Equatable {
+    static let zero = SpectrumPerformanceSnapshot(analyzerFPS: 0, deliveryFPS: 0, renderFPS: 0)
+
+    let analyzerFPS: Double
+    let deliveryFPS: Double
+    let renderFPS: Double
+}
+
+private final class SpectrumPerformanceCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var analyzerCompletions = 0
+    private var mainDeliveries = 0
+
+    func recordAnalyzerCompletion() {
+        lock.lock()
+        analyzerCompletions += 1
+        lock.unlock()
+    }
+
+    func recordMainDelivery() {
+        lock.lock()
+        mainDeliveries += 1
+        lock.unlock()
+    }
+
+    func sampleAndReset(elapsed: TimeInterval) -> (analyzerFPS: Double, deliveryFPS: Double) {
+        lock.lock()
+        let completions = analyzerCompletions
+        let deliveries = mainDeliveries
+        analyzerCompletions = 0
+        mainDeliveries = 0
+        lock.unlock()
+        let safeElapsed = max(elapsed, 0.001)
+        return (Double(completions) / safeElapsed, Double(deliveries) / safeElapsed)
+    }
+
+    func reset() {
+        lock.lock()
+        analyzerCompletions = 0
+        mainDeliveries = 0
+        lock.unlock()
+    }
+}
+
+private final class LatestSpectrumDelivery: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pendingSnapshot: SpectrumSnapshot?
+    private var isMainDeliveryQueued = false
+
+    func submit(
+        _ snapshot: SpectrumSnapshot,
+        performanceCounter: SpectrumPerformanceCounter,
+        deliver: @MainActor @escaping (SpectrumSnapshot) -> Void
+    ) {
+        performanceCounter.recordAnalyzerCompletion()
+        lock.lock()
+        pendingSnapshot = snapshot
+        let shouldQueueDelivery = !isMainDeliveryQueued
+        isMainDeliveryQueued = true
+        lock.unlock()
+
+        guard shouldQueueDelivery else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let latestSnapshot = self.pendingSnapshot
+            self.pendingSnapshot = nil
+            self.isMainDeliveryQueued = false
+            self.lock.unlock()
+
+            if let latestSnapshot {
+                MainActor.assumeIsolated {
+                    performanceCounter.recordMainDelivery()
+                    deliver(latestSnapshot)
+                }
+            }
+        }
+    }
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published private(set) var isProcessing = false
@@ -18,9 +98,11 @@ final class AppState: ObservableObject {
     @Published private(set) var isSavedTargetOutputDeviceMissing = false
     @Published private(set) var isVolumeHotkeyRemappingAvailable = false
     @Published private(set) var spectrum = SpectrumSnapshot.empty
+    @Published private(set) var spectrumPerformance = SpectrumPerformanceSnapshot.zero
     @Published private(set) var isSpectrumFullScreen = false
     @Published private(set) var spectrumBandFallDbPerSecond: Double
     @Published private(set) var spectrumPeakFallDbPerSecond: Double
+    @Published private(set) var spectrumBandSeparation: Double
 
     private let presetStore = PresetStore()
     private let deviceManager = DeviceManager()
@@ -32,9 +114,15 @@ final class AppState: ObservableObject {
     private var isRebuildingAudioPath = false
     private var spectrumPresentationHandler: (() -> Void)?
     private var spectrumFullScreenHandler: (() -> Void)?
+    private let spectrumDelivery = LatestSpectrumDelivery()
+    private let spectrumPerformanceCounter = SpectrumPerformanceCounter()
+    private var spectrumPerformanceTimer: Timer?
+    private var spectrumPerformanceSampleTime = CACurrentMediaTime()
+    private var latestSpectrumRenderFPS = 0.0
 
     private static let spectrumBandFallKey = "peq.spectrumBandFallDbPerSecond"
     private static let spectrumPeakFallKey = "peq.spectrumPeakFallDbPerSecond"
+    private static let spectrumBandSeparationKey = "peq.spectrumBandSeparation"
 
     init() {
         self.settings = presetStore.load()
@@ -49,14 +137,17 @@ final class AppState: ObservableObject {
             forKey: Self.spectrumPeakFallKey,
             defaultValue: SpectrumAnalyzerTuning.defaultPeakFallDbPerSecond
         )
+        self.spectrumBandSeparation = Self.persistedBandSeparation()
         refreshOutputDevices()
         spectrumAnalyzer.setDecayRates(
             bandFallDbPerSecond: spectrumBandFallDbPerSecond,
             peakFallDbPerSecond: spectrumPeakFallDbPerSecond
         )
-        spectrumAnalyzer.onSnapshot = { [weak self] snapshot in
-            DispatchQueue.main.async {
-                self?.spectrum = snapshot
+        spectrumAnalyzer.setBandSeparation(spectrumBandSeparation)
+        spectrumAnalyzer.onSnapshot = { [weak self, spectrumDelivery] snapshot in
+            guard let self else { return }
+            spectrumDelivery.submit(snapshot, performanceCounter: self.spectrumPerformanceCounter) { @MainActor [weak self] latestSnapshot in
+                self?.spectrum = latestSnapshot
             }
         }
     }
@@ -331,6 +422,11 @@ final class AppState: ObservableObject {
 
     func setSpectrumPresented(_ presented: Bool) {
         spectrumAnalyzer.setEnabled(presented)
+        if presented {
+            startSpectrumPerformanceMeasurement()
+        } else {
+            stopSpectrumPerformanceMeasurement()
+        }
         if !presented {
             isSpectrumFullScreen = false
         }
@@ -358,12 +454,57 @@ final class AppState: ObservableObject {
         )
     }
 
+    func setSpectrumBandSeparation(_ value: Double) {
+        spectrumBandSeparation = Self.clampedBandSeparation(value)
+        UserDefaults.standard.set(spectrumBandSeparation, forKey: Self.spectrumBandSeparationKey)
+        spectrumAnalyzer.setBandSeparation(spectrumBandSeparation)
+    }
+
     func showSpectrumAnalyzer() {
         spectrumPresentationHandler?()
     }
 
     func toggleSpectrumFullScreen() {
         spectrumFullScreenHandler?()
+    }
+
+    func reportSpectrumRenderFPS(_ fps: Double) {
+        latestSpectrumRenderFPS = fps
+    }
+
+    private func startSpectrumPerformanceMeasurement() {
+        spectrumPerformanceTimer?.invalidate()
+        spectrumPerformanceCounter.reset()
+        spectrumPerformanceSampleTime = CACurrentMediaTime()
+        latestSpectrumRenderFPS = 0
+        spectrumPerformance = .zero
+        spectrumPerformanceTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.sampleSpectrumPerformance()
+            }
+        }
+        if let spectrumPerformanceTimer {
+            RunLoop.main.add(spectrumPerformanceTimer, forMode: .common)
+        }
+    }
+
+    private func stopSpectrumPerformanceMeasurement() {
+        spectrumPerformanceTimer?.invalidate()
+        spectrumPerformanceTimer = nil
+        spectrumPerformanceCounter.reset()
+        spectrumPerformance = .zero
+    }
+
+    private func sampleSpectrumPerformance() {
+        let now = CACurrentMediaTime()
+        let elapsed = now - spectrumPerformanceSampleTime
+        spectrumPerformanceSampleTime = now
+        let sample = spectrumPerformanceCounter.sampleAndReset(elapsed: elapsed)
+        spectrumPerformance = SpectrumPerformanceSnapshot(
+            analyzerFPS: sample.analyzerFPS,
+            deliveryFPS: sample.deliveryFPS,
+            renderFPS: latestSpectrumRenderFPS
+        )
     }
 
     private func markModified() {
@@ -380,6 +521,17 @@ final class AppState: ObservableObject {
 
     private static func clampedFallRate(_ value: Double) -> Double {
         min(max(value, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
+    }
+
+    private static func persistedBandSeparation() -> Double {
+        guard UserDefaults.standard.object(forKey: spectrumBandSeparationKey) != nil else {
+            return SpectrumAnalyzerTuning.defaultBandSeparation
+        }
+        return clampedBandSeparation(UserDefaults.standard.double(forKey: spectrumBandSeparationKey))
+    }
+
+    private static func clampedBandSeparation(_ value: Double) -> Double {
+        min(max(value, SpectrumAnalyzerTuning.bandSeparationRange.lowerBound), SpectrumAnalyzerTuning.bandSeparationRange.upperBound)
     }
 
     private func persistAndApply() {
