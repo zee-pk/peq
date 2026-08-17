@@ -4,6 +4,7 @@ import SwiftUI
 struct SpectrumSettingsView: View {
     @EnvironmentObject private var appState: AppState
     @State private var draft = SpectrumAnalyzerSettings()
+    @State private var profileName = ""
 
     var body: some View {
         Form {
@@ -19,7 +20,6 @@ struct SpectrumSettingsView: View {
                 DecimalSetting("Band gap", value: $draft.bandGapPixels, range: SpectrumAnalyzerSettings.bandGapRange, step: 1, suffix: "px")
                 DecimalSetting("Minimum level", value: $draft.minimumDb, range: SpectrumAnalyzerSettings.minimumDbRange, step: 1, suffix: "dB")
                 DecimalSetting("Maximum level", value: $draft.maximumDb, range: SpectrumAnalyzerSettings.maximumDbRange, step: 1, suffix: "dB")
-                DecimalSetting("Peak hold", value: $draft.peakHoldSeconds, range: SpectrumAnalyzerSettings.peakHoldRange, step: 0.05, suffix: "s")
                 Text("FFT size, hop, refresh interval, band count, and dB range rebuild the analyzer when applied.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -28,10 +28,40 @@ struct SpectrumSettingsView: View {
             Section("Response") {
                 DecimalSetting("Band fall", value: $draft.bandFallDbPerSecond, range: SpectrumAnalyzerTuning.fallRateRange, step: 1, suffix: "dB/s")
                 DecimalSetting("Peak fall", value: $draft.peakFallDbPerSecond, range: SpectrumAnalyzerTuning.fallRateRange, step: 1, suffix: "dB/s")
+                DecimalSetting("Peak hold", value: $draft.peakHoldSeconds, range: SpectrumAnalyzerSettings.peakHoldRange, step: 0.05, suffix: "s")
                 DecimalSetting("Band separation", value: $draft.bandSeparation, range: SpectrumAnalyzerTuning.bandSeparationRange, step: 0.05, suffix: "amount")
             }
 
             Section("LED appearance") {
+                HStack {
+                    Menu("Load profile") {
+                        if appState.spectrumLEDProfiles.isEmpty {
+                            Text("No saved profiles")
+                        } else {
+                            ForEach(appState.spectrumLEDProfiles) { profile in
+                                Button(profile.name) { profile.applying(to: &draft) }
+                            }
+                        }
+                    }
+                    Spacer()
+                    Menu("Delete profile") {
+                        if appState.spectrumLEDProfiles.isEmpty {
+                            Text("No saved profiles")
+                        } else {
+                            ForEach(appState.spectrumLEDProfiles) { profile in
+                                Button(profile.name, role: .destructive) { appState.deleteSpectrumLEDProfile(profile) }
+                            }
+                        }
+                    }
+                }
+                HStack {
+                    TextField("Profile name", text: $profileName)
+                    Button("Save profile") {
+                        appState.saveSpectrumLEDProfile(name: profileName, settings: draft)
+                        profileName = ""
+                    }
+                    .disabled(profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
                 DecimalSetting("LED rows", value: $draft.ledSegmentCount, range: SpectrumAnalyzerSettings.ledSegmentRange, step: 1, suffix: "segments")
                 DecimalSetting("LED gap", value: $draft.ledGapPercent, range: SpectrumAnalyzerSettings.percentageRange, step: 1, suffix: "%")
                 ColorSetting("Dark red", rgb: colorBinding(\.darkRedRGB))
@@ -42,7 +72,7 @@ struct SpectrumSettingsView: View {
                 DecimalSetting("Orange region", value: $draft.orangeRegionPercent, range: SpectrumAnalyzerSettings.percentageRange, step: 1, suffix: "%")
                 ColorSetting("Yellow", rgb: colorBinding(\.yellowRGB))
                 DecimalSetting("Yellow region", value: $draft.yellowRegionPercent, range: SpectrumAnalyzerSettings.percentageRange, step: 1, suffix: "%")
-                Text("Color-region values are relative sizes and are automatically normalized.")
+                Text("Profiles contain LED appearance only. Load a profile, then Apply to show it. Color-region values are relative sizes and are automatically normalized.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

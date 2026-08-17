@@ -145,6 +145,48 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
     }
 }
 
+struct SpectrumLEDProfile: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var name: String
+    var darkRedRGB: [Double]
+    var orangeRedRGB: [Double]
+    var orangeRGB: [Double]
+    var yellowRGB: [Double]
+    var darkRedRegionPercent: Double
+    var orangeRedRegionPercent: Double
+    var orangeRegionPercent: Double
+    var yellowRegionPercent: Double
+    var ledSegmentCount: Double
+    var ledGapPercent: Double
+
+    init(name: String, settings: SpectrumAnalyzerSettings) {
+        self.name = name
+        darkRedRGB = settings.darkRedRGB
+        orangeRedRGB = settings.orangeRedRGB
+        orangeRGB = settings.orangeRGB
+        yellowRGB = settings.yellowRGB
+        darkRedRegionPercent = settings.darkRedRegionPercent
+        orangeRedRegionPercent = settings.orangeRedRegionPercent
+        orangeRegionPercent = settings.orangeRegionPercent
+        yellowRegionPercent = settings.yellowRegionPercent
+        ledSegmentCount = settings.ledSegmentCount
+        ledGapPercent = settings.ledGapPercent
+    }
+
+    func applying(to settings: inout SpectrumAnalyzerSettings) {
+        settings.darkRedRGB = darkRedRGB
+        settings.orangeRedRGB = orangeRedRGB
+        settings.orangeRGB = orangeRGB
+        settings.yellowRGB = yellowRGB
+        settings.darkRedRegionPercent = darkRedRegionPercent
+        settings.orangeRedRegionPercent = orangeRedRegionPercent
+        settings.orangeRegionPercent = orangeRegionPercent
+        settings.yellowRegionPercent = yellowRegionPercent
+        settings.ledSegmentCount = ledSegmentCount
+        settings.ledGapPercent = ledGapPercent
+    }
+}
+
 struct SpectrumSnapshot: Equatable {
     static let empty = SpectrumSnapshot(left: [], right: [], leftPeaks: [], rightPeaks: [])
 

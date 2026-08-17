@@ -101,6 +101,7 @@ final class AppState: ObservableObject {
     @Published private(set) var spectrumPerformance = SpectrumPerformanceSnapshot.zero
     @Published private(set) var isSpectrumFullScreen = false
     @Published private(set) var spectrumSettings: SpectrumAnalyzerSettings
+    @Published private(set) var spectrumLEDProfiles: [SpectrumLEDProfile]
 
     private let presetStore = PresetStore()
     private let deviceManager = DeviceManager()
@@ -121,6 +122,7 @@ final class AppState: ObservableObject {
     private var latestSpectrumRenderFPS = 0.0
 
     private static let spectrumSettingsKey = "peq.spectrumSettings"
+    private static let spectrumLEDProfilesKey = "peq.spectrumLEDProfiles"
     private static let legacySpectrumBandFallKey = "peq.spectrumBandFallDbPerSecond"
     private static let legacySpectrumPeakFallKey = "peq.spectrumPeakFallDbPerSecond"
     private static let legacySpectrumBandSeparationKey = "peq.spectrumBandSeparation"
@@ -132,6 +134,7 @@ final class AppState: ObservableObject {
         self.isPresetModified = UserDefaults.standard.bool(forKey: "peq.isPresetModified")
         let persistedSpectrumSettings = Self.persistedSpectrumSettings()
         self.spectrumSettings = persistedSpectrumSettings
+        self.spectrumLEDProfiles = Self.persistedSpectrumLEDProfiles()
         self.spectrumAnalyzer = AudioSpectrumAnalyzer(settings: persistedSpectrumSettings)
         refreshOutputDevices()
         configureSpectrumSnapshotDelivery()
@@ -473,6 +476,23 @@ final class AppState: ObservableObject {
         if signalPathChanged { rebuildSpectrumAnalyzer() }
     }
 
+    func saveSpectrumLEDProfile(name: String, settings: SpectrumAnalyzerSettings) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+        let profile = SpectrumLEDProfile(name: trimmedName, settings: settings)
+        if let index = spectrumLEDProfiles.firstIndex(where: { $0.name.localizedCaseInsensitiveCompare(trimmedName) == .orderedSame }) {
+            spectrumLEDProfiles[index] = profile
+        } else {
+            spectrumLEDProfiles.append(profile)
+        }
+        persistSpectrumLEDProfiles()
+    }
+
+    func deleteSpectrumLEDProfile(_ profile: SpectrumLEDProfile) {
+        spectrumLEDProfiles.removeAll { $0.id == profile.id }
+        persistSpectrumLEDProfiles()
+    }
+
     func toggleSpectrumFullScreen() {
         spectrumFullScreenHandler?()
     }
@@ -548,6 +568,12 @@ final class AppState: ObservableObject {
         return settings
     }
 
+    private static func persistedSpectrumLEDProfiles() -> [SpectrumLEDProfile] {
+        guard let data = UserDefaults.standard.data(forKey: spectrumLEDProfilesKey),
+              let profiles = try? JSONDecoder().decode([SpectrumLEDProfile].self, from: data) else { return [] }
+        return profiles.filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
     private static func clampedFallRate(_ value: Double) -> Double {
         min(max(value, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
     }
@@ -559,6 +585,11 @@ final class AppState: ObservableObject {
     private func persistSpectrumSettings() {
         guard let data = try? JSONEncoder().encode(spectrumSettings) else { return }
         UserDefaults.standard.set(data, forKey: Self.spectrumSettingsKey)
+    }
+
+    private func persistSpectrumLEDProfiles() {
+        guard let data = try? JSONEncoder().encode(spectrumLEDProfiles) else { return }
+        UserDefaults.standard.set(data, forKey: Self.spectrumLEDProfilesKey)
     }
 
     private func configureSpectrumSnapshotDelivery() {
