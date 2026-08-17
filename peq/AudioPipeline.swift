@@ -20,6 +20,8 @@ enum AudioRuntimeError: LocalizedError {
 final class AudioPipeline {
     private let tapManager = AudioTapManager()
     private let levelMeter: AudioLevelMeter
+    private let spectrumAnalyzer: AudioSpectrumAnalyzer
+    private let spectrumTapBufferSize: AVAudioFrameCount
     private let healthStore: AudioHealthStore
 
     private var engine: AVAudioEngine?
@@ -31,9 +33,11 @@ final class AudioPipeline {
     private var settings = EQSettings.flat
     private var restartWorkItem: DispatchWorkItem?
 
-    init(levelMeter: AudioLevelMeter, healthStore: AudioHealthStore) {
+    init(levelMeter: AudioLevelMeter, spectrumAnalyzer: AudioSpectrumAnalyzer, healthStore: AudioHealthStore) {
         self.levelMeter = levelMeter
+        self.spectrumAnalyzer = spectrumAnalyzer
         self.healthStore = healthStore
+        self.spectrumTapBufferSize = AVAudioFrameCount(spectrumAnalyzer.snapshotIntervalFrames)
     }
 
     var isRunning: Bool {
@@ -62,6 +66,7 @@ final class AudioPipeline {
         ioProcID = nil
         aggregateDeviceID = AudioDeviceID(kAudioObjectUnknown)
         tapManager.stop()
+        spectrumAnalyzer.reset()
     }
 
     func apply(_ settings: EQSettings) {
@@ -141,8 +146,13 @@ final class AudioPipeline {
         engine.connect(sourceNode, to: eqUnit, format: engineFormat)
         engine.connect(eqUnit, to: engine.mainMixerNode, format: engineFormat)
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
-        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [levelMeter] buffer, _ in
+        engine.mainMixerNode.installTap(
+            onBus: 0,
+            bufferSize: spectrumTapBufferSize,
+            format: nil
+        ) { [levelMeter, spectrumAnalyzer] buffer, _ in
             levelMeter.process(buffer)
+            spectrumAnalyzer.capture(buffer)
         }
 
         engine.prepare()

@@ -72,6 +72,13 @@ struct ContentView: View {
                 Spacer()
                 
                 HStack(spacing: 16) {
+                    Button {
+                        appState.showSpectrumAnalyzer()
+                    } label: {
+                        Label("Spectrum", systemImage: "chart.bar.xaxis")
+                    }
+                    .help("Open full-screen spectrum analyzer")
+
                     Toggle("Bypass", isOn: Binding(
                         get: { appState.settings.bypass },
                         set: { appState.setBypass($0) }
@@ -147,7 +154,7 @@ struct ContentView: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
-                                
+
                                 HStack(spacing: 12) {
                                     Slider(
                                         value: Binding(
@@ -188,9 +195,9 @@ struct ContentView: View {
                                 Label("Audio Health", systemImage: "waveform.path.ecg")
                                     .font(.headline)
                                     .foregroundStyle(.primary)
-                                
+
                                 AudioHealthView(health: appState.audioHealth, isProcessing: appState.isProcessing)
-                                
+
                                 Spacer()
                             }
                             .padding(4)
@@ -347,7 +354,6 @@ private struct AudioHealthView: View {
                 healthItem("Out SR", sampleRateText(health.outputSampleRate))
                 healthItem("Out Pk", peakText(health.outputPeak))
             }
-
             GridRow {
                 healthItem("Tap BD", bitDepthText(health.tapBitDepth))
                 healthItem("Out BD", bitDepthText(health.outputBitDepth))
@@ -359,12 +365,9 @@ private struct AudioHealthView: View {
 
     private func healthItem(_ label: String, _ value: String) -> some View {
         HStack(spacing: 4) {
-            Text(label)
-                .foregroundStyle(.tertiary)
+            Text(label).foregroundStyle(.tertiary)
             Spacer()
-            Text(value)
-                .monospacedDigit()
-                .foregroundStyle(.primary)
+            Text(value).monospacedDigit().foregroundStyle(.primary)
         }
     }
 
@@ -375,8 +378,7 @@ private struct AudioHealthView: View {
 
     private func peakText(_ peak: Float) -> String {
         guard peak > 0 else { return "-inf" }
-        let db = 20 * log10(Double(peak))
-        return String(format: "%.1f dB", db)
+        return String(format: "%.1f dB", 20 * log10(Double(peak)))
     }
 
     private func bitDepthText(_ bitDepth: Int) -> String {
