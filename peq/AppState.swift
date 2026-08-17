@@ -17,21 +17,48 @@ final class AppState: ObservableObject {
     @Published private(set) var currentOutputDeviceUID: String?
     @Published private(set) var isSavedTargetOutputDeviceMissing = false
     @Published private(set) var isVolumeHotkeyRemappingAvailable = false
+    @Published private(set) var spectrum = SpectrumSnapshot.empty
+    @Published private(set) var isSpectrumFullScreen = false
+    @Published private(set) var spectrumBandFallDbPerSecond: Double
+    @Published private(set) var spectrumPeakFallDbPerSecond: Double
 
     private let presetStore = PresetStore()
     private let deviceManager = DeviceManager()
     private let healthStore = AudioHealthStore()
     private lazy var levelMeter = AudioLevelMeter(healthStore: healthStore)
-    private lazy var audioPipeline = AudioPipeline(levelMeter: levelMeter, healthStore: healthStore)
+    private lazy var spectrumAnalyzer = AudioSpectrumAnalyzer()
+    private lazy var audioPipeline = AudioPipeline(levelMeter: levelMeter, spectrumAnalyzer: spectrumAnalyzer, healthStore: healthStore)
     private var levelTimer: Timer?
     private var isRebuildingAudioPath = false
+    private var spectrumPresentationHandler: (() -> Void)?
+    private var spectrumFullScreenHandler: (() -> Void)?
+
+    private static let spectrumBandFallKey = "peq.spectrumBandFallDbPerSecond"
+    private static let spectrumPeakFallKey = "peq.spectrumPeakFallDbPerSecond"
 
     init() {
         self.settings = presetStore.load()
         self.savedPresets = presetStore.getSavedPresets()
         self.activePresetName = UserDefaults.standard.string(forKey: "peq.activePresetName")
         self.isPresetModified = UserDefaults.standard.bool(forKey: "peq.isPresetModified")
+        self.spectrumBandFallDbPerSecond = Self.persistedFallRate(
+            forKey: Self.spectrumBandFallKey,
+            defaultValue: SpectrumAnalyzerTuning.defaultBandFallDbPerSecond
+        )
+        self.spectrumPeakFallDbPerSecond = Self.persistedFallRate(
+            forKey: Self.spectrumPeakFallKey,
+            defaultValue: SpectrumAnalyzerTuning.defaultPeakFallDbPerSecond
+        )
         refreshOutputDevices()
+        spectrumAnalyzer.setDecayRates(
+            bandFallDbPerSecond: spectrumBandFallDbPerSecond,
+            peakFallDbPerSecond: spectrumPeakFallDbPerSecond
+        )
+        spectrumAnalyzer.onSnapshot = { [weak self] snapshot in
+            DispatchQueue.main.async {
+                self?.spectrum = snapshot
+            }
+        }
     }
 
     var isConfiguredOutputDeviceActive: Bool {
@@ -294,11 +321,65 @@ final class AppState: ObservableObject {
         isVolumeHotkeyRemappingAvailable = available
     }
 
+    func setSpectrumPresentationHandler(_ handler: @escaping () -> Void) {
+        spectrumPresentationHandler = handler
+    }
+
+    func setSpectrumFullScreenHandler(_ handler: @escaping () -> Void) {
+        spectrumFullScreenHandler = handler
+    }
+
+    func setSpectrumPresented(_ presented: Bool) {
+        spectrumAnalyzer.setEnabled(presented)
+        if !presented {
+            isSpectrumFullScreen = false
+        }
+    }
+
+    func setSpectrumFullScreen(_ fullScreen: Bool) {
+        isSpectrumFullScreen = fullScreen
+    }
+
+    func setSpectrumBandFallDbPerSecond(_ value: Double) {
+        spectrumBandFallDbPerSecond = Self.clampedFallRate(value)
+        UserDefaults.standard.set(spectrumBandFallDbPerSecond, forKey: Self.spectrumBandFallKey)
+        spectrumAnalyzer.setDecayRates(
+            bandFallDbPerSecond: spectrumBandFallDbPerSecond,
+            peakFallDbPerSecond: spectrumPeakFallDbPerSecond
+        )
+    }
+
+    func setSpectrumPeakFallDbPerSecond(_ value: Double) {
+        spectrumPeakFallDbPerSecond = Self.clampedFallRate(value)
+        UserDefaults.standard.set(spectrumPeakFallDbPerSecond, forKey: Self.spectrumPeakFallKey)
+        spectrumAnalyzer.setDecayRates(
+            bandFallDbPerSecond: spectrumBandFallDbPerSecond,
+            peakFallDbPerSecond: spectrumPeakFallDbPerSecond
+        )
+    }
+
+    func showSpectrumAnalyzer() {
+        spectrumPresentationHandler?()
+    }
+
+    func toggleSpectrumFullScreen() {
+        spectrumFullScreenHandler?()
+    }
+
     private func markModified() {
         if !isPresetModified && activePresetName != nil {
             isPresetModified = true
             UserDefaults.standard.set(true, forKey: "peq.isPresetModified")
         }
+    }
+
+    private static func persistedFallRate(forKey key: String, defaultValue: Double) -> Double {
+        guard UserDefaults.standard.object(forKey: key) != nil else { return defaultValue }
+        return clampedFallRate(UserDefaults.standard.double(forKey: key))
+    }
+
+    private static func clampedFallRate(_ value: Double) -> Double {
+        min(max(value, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
     }
 
     private func persistAndApply() {

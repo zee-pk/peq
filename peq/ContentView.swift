@@ -72,6 +72,13 @@ struct ContentView: View {
                 Spacer()
                 
                 HStack(spacing: 16) {
+                    Button {
+                        appState.showSpectrumAnalyzer()
+                    } label: {
+                        Label("Spectrum", systemImage: "chart.bar.xaxis")
+                    }
+                    .help("Open full-screen spectrum analyzer")
+
                     Toggle("Bypass", isOn: Binding(
                         get: { appState.settings.bypass },
                         set: { appState.setBypass($0) }
@@ -182,14 +189,28 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         }
                         
-                        // Audio Health Group
+                        // Spectrum Analyzer Settings Group
                         GroupBox {
                             VStack(alignment: .leading, spacing: 12) {
-                                Label("Audio Health", systemImage: "waveform.path.ecg")
+                                Label("Spectrum Analyzer", systemImage: "chart.bar.xaxis")
                                     .font(.headline)
                                     .foregroundStyle(.primary)
-                                
-                                AudioHealthView(health: appState.audioHealth, isProcessing: appState.isProcessing)
+
+                                SpectrumFallRateControl(
+                                    title: "Band fall",
+                                    value: Binding(
+                                        get: { appState.spectrumBandFallDbPerSecond },
+                                        set: { appState.setSpectrumBandFallDbPerSecond($0) }
+                                    )
+                                )
+
+                                SpectrumFallRateControl(
+                                    title: "Peak fall",
+                                    value: Binding(
+                                        get: { appState.spectrumPeakFallDbPerSecond },
+                                        set: { appState.setSpectrumPeakFallDbPerSecond($0) }
+                                    )
+                                )
                                 
                                 Spacer()
                             }
@@ -336,52 +357,35 @@ struct ContentView: View {
     }
 }
 
-private struct AudioHealthView: View {
-    let health: AudioHealthSnapshot
-    let isProcessing: Bool
+private struct SpectrumFallRateControl: View {
+    let title: String
+    let value: Binding<Double>
 
     var body: some View {
-        Grid(horizontalSpacing: 24, verticalSpacing: 8) {
-            GridRow {
-                healthItem("Tap SR", sampleRateText(health.tapSampleRate))
-                healthItem("Out SR", sampleRateText(health.outputSampleRate))
-                healthItem("Out Pk", peakText(health.outputPeak))
-            }
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-            GridRow {
-                healthItem("Tap BD", bitDepthText(health.tapBitDepth))
-                healthItem("Out BD", bitDepthText(health.outputBitDepth))
+            HStack(spacing: 10) {
+                Slider(
+                    value: value,
+                    in: SpectrumAnalyzerTuning.fallRateRange,
+                    step: 1
+                )
+                NumberField(
+                    value: value,
+                    range: SpectrumAnalyzerTuning.fallRateRange,
+                    step: 1,
+                    fractionDigits: 0,
+                    width: 52
+                )
+                Text("dB/s")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 30, alignment: .leading)
             }
         }
-        .font(.caption)
-        .foregroundStyle(isProcessing ? .secondary : .tertiary)
-    }
-
-    private func healthItem(_ label: String, _ value: String) -> some View {
-        HStack(spacing: 4) {
-            Text(label)
-                .foregroundStyle(.tertiary)
-            Spacer()
-            Text(value)
-                .monospacedDigit()
-                .foregroundStyle(.primary)
-        }
-    }
-
-    private func sampleRateText(_ sampleRate: Double) -> String {
-        guard sampleRate > 0 else { return "-" }
-        return String(format: "%.1f k", sampleRate / 1_000)
-    }
-
-    private func peakText(_ peak: Float) -> String {
-        guard peak > 0 else { return "-inf" }
-        let db = 20 * log10(Double(peak))
-        return String(format: "%.1f dB", db)
-    }
-
-    private func bitDepthText(_ bitDepth: Int) -> String {
-        guard bitDepth > 0 else { return "-" }
-        return "\(bitDepth)-bit"
     }
 }
 

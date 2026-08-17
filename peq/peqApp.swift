@@ -81,11 +81,19 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private let statusItem: NSStatusItem
     private var appWindow: NSPanel?
     private var permissionWindow: NSPanel?
+    private var spectrumWindow: NSWindow?
+    private var spectrumClosePending = false
 
     init(appState: AppState) {
         self.appState = appState
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
+        appState.setSpectrumPresentationHandler { [weak self] in
+            self?.showSpectrumWindow()
+        }
+        appState.setSpectrumFullScreenHandler { [weak self] in
+            self?.spectrumWindow?.toggleFullScreen(nil)
+        }
 
         if let button = statusItem.button {
             let image = NSImage(
@@ -125,6 +133,14 @@ final class StatusBarController: NSObject, NSWindowDelegate {
             bypassItem.target = self
             bypassItem.state = appState.settings.bypass ? .on : .off
             menu.addItem(bypassItem)
+
+            let spectrumItem = NSMenuItem(
+                title: "Open Spectrum Analyzer",
+                action: #selector(showSpectrumAnalyzer),
+                keyEquivalent: ""
+            )
+            spectrumItem.target = self
+            menu.addItem(spectrumItem)
             
             menu.addItem(.separator())
             
@@ -162,6 +178,10 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     @objc private func toggleBypass() {
         appState.setBypass(!appState.settings.bypass)
+    }
+
+    @objc private func showSpectrumAnalyzer() {
+        showSpectrumWindow()
     }
     
     @objc private func toggleLaunchAtLogin() {
@@ -229,6 +249,38 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         window.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
+    private func showSpectrumWindow() {
+        if spectrumWindow == nil {
+            let hosting = NSHostingController(
+                rootView: SpectrumAnalyzerView()
+                    .environmentObject(appState)
+            )
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1_280, height: 780),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Spectrum Analyzer"
+            window.titleVisibility = .hidden
+            window.contentViewController = hosting
+            window.collectionBehavior = [.fullScreenPrimary]
+            window.isReleasedWhenClosed = false
+            window.delegate = self
+            window.center()
+            spectrumWindow = window
+        }
+
+        guard let spectrumWindow else { return }
+        spectrumClosePending = false
+        appState.setSpectrumPresented(true)
+        spectrumWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if !spectrumWindow.styleMask.contains(.fullScreen) {
+            spectrumWindow.toggleFullScreen(nil)
+        }
+    }
+
     // MARK: - Permission Window
 
     func showPermissionWindow() {
@@ -264,8 +316,30 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender == spectrumWindow, sender.styleMask.contains(.fullScreen) {
+            spectrumClosePending = true
+            sender.toggleFullScreen(nil)
+            return false
+        }
+        if sender == spectrumWindow {
+            appState.setSpectrumPresented(false)
+        }
         sender.orderOut(nil)
         return false
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        guard notification.object as? NSWindow == spectrumWindow else { return }
+        appState.setSpectrumFullScreen(true)
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        guard notification.object as? NSWindow == spectrumWindow else { return }
+        appState.setSpectrumFullScreen(false)
+        guard spectrumClosePending, let spectrumWindow else { return }
+        spectrumClosePending = false
+        spectrumWindow.orderOut(nil)
+        appState.setSpectrumPresented(false)
     }
 }
 
