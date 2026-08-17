@@ -5,22 +5,89 @@ import Darwin
 import SwiftUI
 
 enum SpectrumAnalyzerTuning {
-    // 4,096 samples is ~85 ms at 48 kHz: materially less latency while retaining useful bass resolution.
-    static let fftSize = 4_096
-    static let snapshotHopFrames = 256
-    static let refreshInterval = DispatchTimeInterval.milliseconds(8)
+    static let minimumFrequency: Float = 20
+    static let maximumFrequency: Float = 20_000
+    static let defaultFFTSize = 8_192
+    static let defaultSnapshotHopFrames = 256
+    static let defaultRefreshIntervalMilliseconds = 1
+    static let defaultBandCount = 32
+    static let defaultBandGapPixels: CGFloat = 8
+    static let defaultPeakHoldSeconds = 0.50
     static let defaultBandFallDbPerSecond = 45.0
     static let defaultPeakFallDbPerSecond = 18.0
     static let fallRateRange: ClosedRange<Double> = 1...240
     static let defaultBandSeparation = 0.35
     static let bandSeparationRange: ClosedRange<Double> = 0...0.8
+
+    static func centerFrequency(forBand index: Int, bandCount: Int) -> Float {
+        guard bandCount > 0 else { return minimumFrequency }
+        return minimumFrequency * powf(maximumFrequency / minimumFrequency, (Float(index) + 0.5) / Float(bandCount))
+    }
+}
+
+/// Stored independently from EQ presets because it controls the analyzer rather than audio processing.
+struct SpectrumAnalyzerSettings: Codable, Equatable {
+    var fftSize = SpectrumAnalyzerTuning.defaultFFTSize
+    var snapshotHopFrames = SpectrumAnalyzerTuning.defaultSnapshotHopFrames
+    var refreshIntervalMilliseconds = SpectrumAnalyzerTuning.defaultRefreshIntervalMilliseconds
+    var bandCount = SpectrumAnalyzerTuning.defaultBandCount
+    var bandGapPixels = Double(SpectrumAnalyzerTuning.defaultBandGapPixels)
+    var peakHoldSeconds = SpectrumAnalyzerTuning.defaultPeakHoldSeconds
+    var bandFallDbPerSecond = SpectrumAnalyzerTuning.defaultBandFallDbPerSecond
+    var peakFallDbPerSecond = SpectrumAnalyzerTuning.defaultPeakFallDbPerSecond
+    var bandSeparation = SpectrumAnalyzerTuning.defaultBandSeparation
+    var darkRedRGB = [0.72, 0.015, 0.025]
+    var orangeRedRGB = [1.0, 0.12, 0.035]
+    var orangeRGB = [1.0, 0.42, 0.04]
+    var yellowRGB = [1.0, 0.86, 0.12]
+    var darkRedRegionPercent = 15.0
+    var orangeRedRegionPercent = 20.0
+    var orangeRegionPercent = 20.0
+    var yellowRegionPercent = 25.0
+    var ledSegmentCount = 40.0
+    var ledGapPercent = 20.0
+
+    static let fftSizes = [2_048, 4_096, 8_192, 16_384]
+    static let bandCountRange = 8...128
+    static let hopFrameRange = 32...2_048
+    static let refreshIntervalRange = 1...100
+    static let bandGapRange = 0.0...24.0
+    static let peakHoldRange = 0.0...5.0
+    static let ledSegmentRange = 4.0...160.0
+    static let percentageRange = 0.0...100.0
+
+    mutating func sanitize() {
+        if !Self.fftSizes.contains(fftSize) { fftSize = SpectrumAnalyzerTuning.defaultFFTSize }
+        snapshotHopFrames = min(max(snapshotHopFrames, Self.hopFrameRange.lowerBound), min(Self.hopFrameRange.upperBound, fftSize))
+        refreshIntervalMilliseconds = min(max(refreshIntervalMilliseconds, Self.refreshIntervalRange.lowerBound), Self.refreshIntervalRange.upperBound)
+        bandCount = min(max(bandCount, Self.bandCountRange.lowerBound), Self.bandCountRange.upperBound)
+        bandGapPixels = min(max(bandGapPixels, Self.bandGapRange.lowerBound), Self.bandGapRange.upperBound)
+        peakHoldSeconds = min(max(peakHoldSeconds, Self.peakHoldRange.lowerBound), Self.peakHoldRange.upperBound)
+        bandFallDbPerSecond = min(max(bandFallDbPerSecond, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
+        peakFallDbPerSecond = min(max(peakFallDbPerSecond, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
+        bandSeparation = min(max(bandSeparation, SpectrumAnalyzerTuning.bandSeparationRange.lowerBound), SpectrumAnalyzerTuning.bandSeparationRange.upperBound)
+        darkRedRGB = Self.sanitizedColor(darkRedRGB)
+        orangeRedRGB = Self.sanitizedColor(orangeRedRGB)
+        orangeRGB = Self.sanitizedColor(orangeRGB)
+        yellowRGB = Self.sanitizedColor(yellowRGB)
+        darkRedRegionPercent = Self.clampPercent(darkRedRegionPercent)
+        orangeRedRegionPercent = Self.clampPercent(orangeRedRegionPercent)
+        orangeRegionPercent = Self.clampPercent(orangeRegionPercent)
+        yellowRegionPercent = Self.clampPercent(yellowRegionPercent)
+        ledSegmentCount = min(max(ledSegmentCount, Self.ledSegmentRange.lowerBound), Self.ledSegmentRange.upperBound)
+        ledGapPercent = Self.clampPercent(ledGapPercent)
+    }
+
+    private static func sanitizedColor(_ color: [Double]) -> [Double] {
+        (0..<3).map { index in min(1, max(0, color.indices.contains(index) ? color[index] : 0)) }
+    }
+    private static func clampPercent(_ value: Double) -> Double { min(100, max(0, value)) }
 }
 
 struct SpectrumSnapshot: Equatable {
-    static let barCount = 72
     static let floorDb: Float = -90
     static let ceilingDb: Float = 0
-    static let empty = SpectrumSnapshot(left: Array(repeating: floorDb, count: barCount), right: Array(repeating: floorDb, count: barCount), leftPeaks: Array(repeating: floorDb, count: barCount), rightPeaks: Array(repeating: floorDb, count: barCount))
+    static let empty = SpectrumSnapshot(left: [], right: [], leftPeaks: [], rightPeaks: [])
 
     let left: [Float]
     let right: [Float]
@@ -56,14 +123,16 @@ private final class SpectrumSnapshotSlot: @unchecked Sendable {
 
 /// The mixer tap is an SPSC producer: it writes only producer-owned history and free snapshot slots.
 final class AudioSpectrumAnalyzer: @unchecked Sendable {
-    private let fftSize = SpectrumAnalyzerTuning.fftSize
-    private let snapshotIntervalFrames = SpectrumAnalyzerTuning.snapshotHopFrames
+    let fftSize: Int
+    let snapshotIntervalFrames: Int
+    private let bandCount: Int
     private let queue = DispatchQueue(label: "com.peq.spectrum-fft", qos: .userInitiated)
     private let isEnabled = ManagedAtomic<Bool>(false)
     private let generation = ManagedAtomic<Int64>(0)
     private let bandFallDbPerSecond = AtomicFloat(Float(SpectrumAnalyzerTuning.defaultBandFallDbPerSecond))
     private let peakFallDbPerSecond = AtomicFloat(Float(SpectrumAnalyzerTuning.defaultPeakFallDbPerSecond))
     private let bandSeparation = AtomicFloat(Float(SpectrumAnalyzerTuning.defaultBandSeparation))
+    private let peakHoldSeconds = AtomicFloat(Float(SpectrumAnalyzerTuning.defaultPeakHoldSeconds))
     private let historyLeft: UnsafeMutablePointer<Float>
     private let historyRight: UnsafeMutablePointer<Float>
     private let snapshotSlots: [SpectrumSnapshotSlot]
@@ -79,23 +148,32 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
     private var historyFrameCount = 0
     private var framesSinceSnapshot = 0
     private var nextSequence: Int64 = 0
-    private var leftDisplayed = Array(repeating: SpectrumSnapshot.floorDb, count: SpectrumSnapshot.barCount)
-    private var rightDisplayed = Array(repeating: SpectrumSnapshot.floorDb, count: SpectrumSnapshot.barCount)
-    private var leftPeaks = Array(repeating: SpectrumSnapshot.floorDb, count: SpectrumSnapshot.barCount)
-    private var rightPeaks = Array(repeating: SpectrumSnapshot.floorDb, count: SpectrumSnapshot.barCount)
+    private var leftDisplayed: [Float]
+    private var rightDisplayed: [Float]
+    private var leftPeaks: [Float]
+    private var rightPeaks: [Float]
+    private var leftPeakHoldRemaining: [TimeInterval]
+    private var rightPeakHoldRemaining: [TimeInterval]
     private var lastPeakUpdate = CACurrentMediaTime()
     private var timer: DispatchSourceTimer?
 
     var onSnapshot: (@Sendable (SpectrumSnapshot) -> Void)?
 
-    init() {
+    init(settings: SpectrumAnalyzerSettings) {
+        fftSize = settings.fftSize
+        snapshotIntervalFrames = settings.snapshotHopFrames
+        bandCount = settings.bandCount
+        leftDisplayed = Array(repeating: SpectrumSnapshot.floorDb, count: settings.bandCount)
+        rightDisplayed = Array(repeating: SpectrumSnapshot.floorDb, count: settings.bandCount)
+        leftPeaks = Array(repeating: SpectrumSnapshot.floorDb, count: settings.bandCount)
+        rightPeaks = Array(repeating: SpectrumSnapshot.floorDb, count: settings.bandCount)
+        leftPeakHoldRemaining = Array(repeating: 0, count: settings.bandCount)
+        rightPeakHoldRemaining = Array(repeating: 0, count: settings.bandCount)
         historyLeft = .allocate(capacity: fftSize)
         historyRight = .allocate(capacity: fftSize)
         snapshotSlots = [
-            SpectrumSnapshotSlot(frameCount: SpectrumAnalyzerTuning.fftSize),
-            SpectrumSnapshotSlot(frameCount: SpectrumAnalyzerTuning.fftSize),
-            SpectrumSnapshotSlot(frameCount: SpectrumAnalyzerTuning.fftSize),
-            SpectrumSnapshotSlot(frameCount: SpectrumAnalyzerTuning.fftSize)
+            SpectrumSnapshotSlot(frameCount: fftSize), SpectrumSnapshotSlot(frameCount: fftSize),
+            SpectrumSnapshotSlot(frameCount: fftSize), SpectrumSnapshotSlot(frameCount: fftSize)
         ]
         real = .allocate(capacity: fftSize)
         imaginary = .allocate(capacity: fftSize)
@@ -114,10 +192,14 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
         fftSetup = vDSP_create_fftsetup(vDSP_Length(log2(Float(fftSize))), FFTRadix(kFFTRadix2))!
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + SpectrumAnalyzerTuning.refreshInterval, repeating: SpectrumAnalyzerTuning.refreshInterval)
+        let interval = DispatchTimeInterval.milliseconds(settings.refreshIntervalMilliseconds)
+        timer.schedule(deadline: .now() + interval, repeating: interval)
         timer.setEventHandler { [weak self] in self?.analyzeLatestSamples() }
         timer.resume()
         self.timer = timer
+        setDecayRates(bandFallDbPerSecond: settings.bandFallDbPerSecond, peakFallDbPerSecond: settings.peakFallDbPerSecond)
+        setBandSeparation(settings.bandSeparation)
+        peakHoldSeconds.store(Float(settings.peakHoldSeconds))
     }
 
     deinit {
@@ -141,6 +223,8 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
         let range = SpectrumAnalyzerTuning.bandSeparationRange
         bandSeparation.store(Float(min(max(value, range.lowerBound), range.upperBound)))
     }
+
+    func setPeakHoldSeconds(_ value: Double) { peakHoldSeconds.store(Float(min(max(value, SpectrumAnalyzerSettings.peakHoldRange.lowerBound), SpectrumAnalyzerSettings.peakHoldRange.upperBound))) }
 
     /// Called by the post-EQ mixer tap. No allocations, dispatching, or FFT work occur here.
     func capture(_ buffer: AVAudioPCMBuffer) {
@@ -186,12 +270,14 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
                       slot.generation.load(ordering: .relaxed) != currentGeneration else { continue }
                 self.releaseReadySlot(slot)
             }
-            self.leftPeaks = Array(repeating: SpectrumSnapshot.floorDb, count: SpectrumSnapshot.barCount)
+            self.leftPeaks = Array(repeating: SpectrumSnapshot.floorDb, count: self.bandCount)
             self.rightPeaks = self.leftPeaks
+            self.leftPeakHoldRemaining = Array(repeating: 0, count: self.bandCount)
+            self.rightPeakHoldRemaining = self.leftPeakHoldRemaining
             self.leftDisplayed = self.leftPeaks
             self.rightDisplayed = self.leftPeaks
             self.lastPeakUpdate = CACurrentMediaTime()
-            self.onSnapshot?(.empty)
+            self.onSnapshot?(SpectrumSnapshot(left: self.leftPeaks, right: self.rightPeaks, leftPeaks: self.leftPeaks, rightPeaks: self.rightPeaks))
         }
     }
 
@@ -258,14 +344,45 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
         let elapsed = Float(now - lastPeakUpdate)
         lastPeakUpdate = now
         let bandFall = elapsed * bandFallDbPerSecond.load()
-        let peakFall = elapsed * peakFallDbPerSecond.load()
-        for index in 0..<SpectrumSnapshot.barCount {
+        let peakFallRate = peakFallDbPerSecond.load()
+        for index in 0..<bandCount {
             leftDisplayed[index] = max(leftBars[index], leftDisplayed[index] - bandFall)
             rightDisplayed[index] = max(rightBars[index], rightDisplayed[index] - bandFall)
-            leftPeaks[index] = max(leftBars[index], leftDisplayed[index], leftPeaks[index] - peakFall)
-            rightPeaks[index] = max(rightBars[index], rightDisplayed[index], rightPeaks[index] - peakFall)
+            updatePeak(
+                candidate: max(leftBars[index], leftDisplayed[index]),
+                elapsed: elapsed,
+                fallRate: peakFallRate,
+                peak: &leftPeaks[index],
+                holdRemaining: &leftPeakHoldRemaining[index]
+            )
+            updatePeak(
+                candidate: max(rightBars[index], rightDisplayed[index]),
+                elapsed: elapsed,
+                fallRate: peakFallRate,
+                peak: &rightPeaks[index],
+                holdRemaining: &rightPeakHoldRemaining[index]
+            )
         }
         return SpectrumSnapshot(left: leftDisplayed, right: rightDisplayed, leftPeaks: leftPeaks, rightPeaks: rightPeaks)
+    }
+
+    private func updatePeak(
+        candidate: Float,
+        elapsed: Float,
+        fallRate: Float,
+        peak: inout Float,
+        holdRemaining: inout TimeInterval
+    ) {
+        if candidate >= peak {
+            peak = candidate
+            holdRemaining = TimeInterval(peakHoldSeconds.load())
+            return
+        }
+
+        let heldDuration = min(TimeInterval(elapsed), holdRemaining)
+        holdRemaining -= heldDuration
+        let decayDuration = max(0, elapsed - Float(heldDuration))
+        peak = max(candidate, peak - (fallRate * decayDuration))
     }
 
     private func makeBars(samples: UnsafeMutablePointer<Float>, sampleRate: Float) -> [Float] {
@@ -274,13 +391,13 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
         var split = DSPSplitComplex(realp: real, imagp: imaginary)
         vDSP_fft_zip(fftSetup, &split, 1, vDSP_Length(log2(Float(fftSize))), FFTDirection(FFT_FORWARD))
         vDSP_zvmags(&split, 1, magnitudes, 1, vDSP_Length(fftSize / 2))
-        var amplitudes = Array(repeating: Float.zero, count: SpectrumSnapshot.barCount)
+        var amplitudes = Array(repeating: Float.zero, count: bandCount)
         let nyquist = sampleRate / 2
-        guard nyquist > 20 else { return Array(repeating: SpectrumSnapshot.floorDb, count: SpectrumSnapshot.barCount) }
+        guard nyquist > 20 else { return Array(repeating: SpectrumSnapshot.floorDb, count: bandCount) }
         let amplitudeScale = 2 / windowSum
 
         for bar in amplitudes.indices {
-            let centerFrequency = 20 * powf(1_000, (Float(bar) + 0.5) / Float(amplitudes.count))
+            let centerFrequency = SpectrumAnalyzerTuning.centerFrequency(forBand: bar, bandCount: amplitudes.count)
             guard centerFrequency <= nyquist else { continue }
             let exactBin = centerFrequency * Float(fftSize) / sampleRate
             let lowerBin = max(1, min((fftSize / 2) - 1, Int(floor(exactBin))))
@@ -322,7 +439,6 @@ struct SpectrumAnalyzerView: View {
     @EnvironmentObject private var appState: AppState
 
     private let dbTicks: [Float] = [0, -12, -24, -36, -48, -60, -72, -84]
-    private let frequencyTicks: [(Float, String)] = [(20, "20"), (100, "100"), (1_000, "1k"), (5_000, "5k"), (10_000, "10k"), (20_000, "20k")]
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -333,7 +449,11 @@ struct SpectrumAnalyzerView: View {
                         Text("POST-EQ SPECTRUM")
                             .font(.system(size: 13, weight: .bold, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.9))
-                        Text(appState.isProcessing ? "Output mixer · 20 Hz – 20 kHz · 4,096-point FFT" : "Enable EQ to analyze output")
+                        Text(appState.isProcessing ? String(
+                            format: "Output mixer · 20 Hz – 20 kHz · %d-point FFT · %.1f ms window at 48 kHz",
+                            appState.spectrumSettings.fftSize,
+                            Double(appState.spectrumSettings.fftSize) / 48
+                        ) : "Enable EQ to analyze output")
                             .font(.caption.monospaced())
                             .foregroundStyle(.white.opacity(0.55))
                         Text(String(
@@ -351,10 +471,10 @@ struct SpectrumAnalyzerView: View {
                 .padding(.top, 22)
 
                 ZStack {
-                    SpectrumMetalView(snapshot: appState.spectrum) { fps in
+                    SpectrumMetalView(snapshot: appState.spectrum, settings: appState.spectrumSettings) { fps in
                         appState.reportSpectrumRenderFPS(fps)
                     }
-                    SpectrumPlotLabels(dbTicks: dbTicks, frequencyTicks: frequencyTicks)
+                    SpectrumPlotLabels(dbTicks: dbTicks, bandCount: appState.spectrumSettings.bandCount)
                         .allowsHitTesting(false)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -362,12 +482,9 @@ struct SpectrumAnalyzerView: View {
             .padding(.bottom, 28)
 
             Button {
-                appState.toggleSpectrumFullScreen()
+                appState.showSpectrumSettings()
             } label: {
-                Label(
-                    appState.isSpectrumFullScreen ? "Exit Full Screen" : "Enter Full Screen",
-                    systemImage: appState.isSpectrumFullScreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right"
-                )
+                Label("Settings", systemImage: "gearshape")
             }
             .buttonStyle(.bordered)
             .tint(.white.opacity(0.18))
@@ -380,7 +497,7 @@ struct SpectrumAnalyzerView: View {
 
 private struct SpectrumPlotLabels: View {
     let dbTicks: [Float]
-    let frequencyTicks: [(Float, String)]
+    let bandCount: Int
 
     var body: some View {
         GeometryReader { geometry in
@@ -399,11 +516,13 @@ private struct SpectrumPlotLabels: View {
                             .position(x: 48, y: yPosition(tick, in: plot))
                     }
 
-                    ForEach(Array(frequencyTicks.enumerated()), id: \.offset) { _, frequencyTick in
-                        Text(frequencyTick.1)
-                            .font(.system(size: 10, design: .monospaced))
+                    ForEach(Array(stride(from: 0, to: bandCount, by: 2)), id: \.self) { band in
+                        Text(frequencyLabel(forBand: band))
+                            .font(.system(size: labelFontSize(for: plot), design: .monospaced))
                             .foregroundStyle(.white.opacity(0.55))
-                            .position(x: xPosition(frequencyTick.0, in: plot), y: plot.maxY + 12)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.5)
+                            .position(x: xPosition(forBand: band, in: plot), y: plot.maxY + 12)
                     }
                 }
             }
@@ -415,8 +534,21 @@ private struct SpectrumPlotLabels: View {
         return plot.maxY - (fraction * plot.height)
     }
 
-    private func xPosition(_ frequency: Float, in plot: CGRect) -> CGFloat {
-        let fraction = log10f(frequency / 20) / 3
-        return plot.minX + CGFloat(fraction) * plot.width
+    private func xPosition(forBand band: Int, in plot: CGRect) -> CGFloat {
+        plot.minX + ((CGFloat(band) + 0.5) / CGFloat(max(1, bandCount))) * plot.width
+    }
+
+    private func labelFontSize(for plot: CGRect) -> CGFloat {
+        let widthPerLabel = (plot.width / CGFloat(max(1, bandCount))) * 2
+        return min(10, max(5, widthPerLabel * 0.35))
+    }
+
+    private func frequencyLabel(forBand band: Int) -> String {
+        let frequency = SpectrumAnalyzerTuning.centerFrequency(forBand: band, bandCount: bandCount)
+        if frequency < 1_000 {
+            return "\(Int(frequency.rounded()))"
+        }
+        let kilohertz = frequency / 1_000
+        return kilohertz >= 10 ? String(format: "%.0fk", kilohertz) : String(format: "%.1fk", kilohertz)
     }
 }

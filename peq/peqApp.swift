@@ -82,6 +82,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
     private var appWindow: NSPanel?
     private var permissionWindow: NSPanel?
     private var spectrumWindow: NSWindow?
+    private var spectrumSettingsWindow: NSWindow?
     private var spectrumClosePending = false
 
     init(appState: AppState) {
@@ -93,6 +94,9 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         }
         appState.setSpectrumFullScreenHandler { [weak self] in
             self?.spectrumWindow?.toggleFullScreen(nil)
+        }
+        appState.setSpectrumSettingsPresentationHandler { [weak self] in
+            self?.showSpectrumSettingsWindow()
         }
 
         if let button = statusItem.button {
@@ -279,6 +283,31 @@ final class StatusBarController: NSObject, NSWindowDelegate {
         if !spectrumWindow.styleMask.contains(.fullScreen) {
             spectrumWindow.toggleFullScreen(nil)
         }
+    }
+
+    private func showSpectrumSettingsWindow() {
+        if spectrumSettingsWindow == nil {
+            let hosting = NSHostingController(
+                rootView: SpectrumSettingsView()
+                    .environmentObject(appState)
+            )
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 720),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Spectrum Analyzer Settings"
+            window.isReleasedWhenClosed = false
+            window.contentViewController = hosting
+            // Keep this utility window in the analyzer's full-screen Space instead of switching Spaces.
+            window.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
+            window.level = .floating
+            window.center()
+            spectrumSettingsWindow = window
+        }
+        spectrumSettingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - Permission Window

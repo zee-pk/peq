@@ -100,56 +100,41 @@ final class AppState: ObservableObject {
     @Published private(set) var spectrum = SpectrumSnapshot.empty
     @Published private(set) var spectrumPerformance = SpectrumPerformanceSnapshot.zero
     @Published private(set) var isSpectrumFullScreen = false
-    @Published private(set) var spectrumBandFallDbPerSecond: Double
-    @Published private(set) var spectrumPeakFallDbPerSecond: Double
-    @Published private(set) var spectrumBandSeparation: Double
+    @Published private(set) var spectrumSettings: SpectrumAnalyzerSettings
 
     private let presetStore = PresetStore()
     private let deviceManager = DeviceManager()
     private let healthStore = AudioHealthStore()
     private lazy var levelMeter = AudioLevelMeter(healthStore: healthStore)
-    private lazy var spectrumAnalyzer = AudioSpectrumAnalyzer()
+    private var spectrumAnalyzer: AudioSpectrumAnalyzer
     private lazy var audioPipeline = AudioPipeline(levelMeter: levelMeter, spectrumAnalyzer: spectrumAnalyzer, healthStore: healthStore)
     private var levelTimer: Timer?
     private var isRebuildingAudioPath = false
     private var spectrumPresentationHandler: (() -> Void)?
     private var spectrumFullScreenHandler: (() -> Void)?
+    private var spectrumSettingsPresentationHandler: (() -> Void)?
+    private var isSpectrumPresented = false
     private let spectrumDelivery = LatestSpectrumDelivery()
     private let spectrumPerformanceCounter = SpectrumPerformanceCounter()
     private var spectrumPerformanceTimer: Timer?
     private var spectrumPerformanceSampleTime = CACurrentMediaTime()
     private var latestSpectrumRenderFPS = 0.0
 
-    private static let spectrumBandFallKey = "peq.spectrumBandFallDbPerSecond"
-    private static let spectrumPeakFallKey = "peq.spectrumPeakFallDbPerSecond"
-    private static let spectrumBandSeparationKey = "peq.spectrumBandSeparation"
+    private static let spectrumSettingsKey = "peq.spectrumSettings"
+    private static let legacySpectrumBandFallKey = "peq.spectrumBandFallDbPerSecond"
+    private static let legacySpectrumPeakFallKey = "peq.spectrumPeakFallDbPerSecond"
+    private static let legacySpectrumBandSeparationKey = "peq.spectrumBandSeparation"
 
     init() {
         self.settings = presetStore.load()
         self.savedPresets = presetStore.getSavedPresets()
         self.activePresetName = UserDefaults.standard.string(forKey: "peq.activePresetName")
         self.isPresetModified = UserDefaults.standard.bool(forKey: "peq.isPresetModified")
-        self.spectrumBandFallDbPerSecond = Self.persistedFallRate(
-            forKey: Self.spectrumBandFallKey,
-            defaultValue: SpectrumAnalyzerTuning.defaultBandFallDbPerSecond
-        )
-        self.spectrumPeakFallDbPerSecond = Self.persistedFallRate(
-            forKey: Self.spectrumPeakFallKey,
-            defaultValue: SpectrumAnalyzerTuning.defaultPeakFallDbPerSecond
-        )
-        self.spectrumBandSeparation = Self.persistedBandSeparation()
+        let persistedSpectrumSettings = Self.persistedSpectrumSettings()
+        self.spectrumSettings = persistedSpectrumSettings
+        self.spectrumAnalyzer = AudioSpectrumAnalyzer(settings: persistedSpectrumSettings)
         refreshOutputDevices()
-        spectrumAnalyzer.setDecayRates(
-            bandFallDbPerSecond: spectrumBandFallDbPerSecond,
-            peakFallDbPerSecond: spectrumPeakFallDbPerSecond
-        )
-        spectrumAnalyzer.setBandSeparation(spectrumBandSeparation)
-        spectrumAnalyzer.onSnapshot = { [weak self, spectrumDelivery] snapshot in
-            guard let self else { return }
-            spectrumDelivery.submit(snapshot, performanceCounter: self.spectrumPerformanceCounter) { @MainActor [weak self] latestSnapshot in
-                self?.spectrum = latestSnapshot
-            }
-        }
+        configureSpectrumSnapshotDelivery()
     }
 
     var isConfiguredOutputDeviceActive: Bool {
@@ -416,11 +401,16 @@ final class AppState: ObservableObject {
         spectrumPresentationHandler = handler
     }
 
+    func setSpectrumSettingsPresentationHandler(_ handler: @escaping () -> Void) {
+        spectrumSettingsPresentationHandler = handler
+    }
+
     func setSpectrumFullScreenHandler(_ handler: @escaping () -> Void) {
         spectrumFullScreenHandler = handler
     }
 
     func setSpectrumPresented(_ presented: Bool) {
+        isSpectrumPresented = presented
         spectrumAnalyzer.setEnabled(presented)
         if presented {
             startSpectrumPerformanceMeasurement()
@@ -437,31 +427,48 @@ final class AppState: ObservableObject {
     }
 
     func setSpectrumBandFallDbPerSecond(_ value: Double) {
-        spectrumBandFallDbPerSecond = Self.clampedFallRate(value)
-        UserDefaults.standard.set(spectrumBandFallDbPerSecond, forKey: Self.spectrumBandFallKey)
+        spectrumSettings.bandFallDbPerSecond = Self.clampedFallRate(value)
+        persistSpectrumSettings()
         spectrumAnalyzer.setDecayRates(
-            bandFallDbPerSecond: spectrumBandFallDbPerSecond,
-            peakFallDbPerSecond: spectrumPeakFallDbPerSecond
+            bandFallDbPerSecond: spectrumSettings.bandFallDbPerSecond,
+            peakFallDbPerSecond: spectrumSettings.peakFallDbPerSecond
         )
     }
 
     func setSpectrumPeakFallDbPerSecond(_ value: Double) {
-        spectrumPeakFallDbPerSecond = Self.clampedFallRate(value)
-        UserDefaults.standard.set(spectrumPeakFallDbPerSecond, forKey: Self.spectrumPeakFallKey)
+        spectrumSettings.peakFallDbPerSecond = Self.clampedFallRate(value)
+        persistSpectrumSettings()
         spectrumAnalyzer.setDecayRates(
-            bandFallDbPerSecond: spectrumBandFallDbPerSecond,
-            peakFallDbPerSecond: spectrumPeakFallDbPerSecond
+            bandFallDbPerSecond: spectrumSettings.bandFallDbPerSecond,
+            peakFallDbPerSecond: spectrumSettings.peakFallDbPerSecond
         )
     }
 
     func setSpectrumBandSeparation(_ value: Double) {
-        spectrumBandSeparation = Self.clampedBandSeparation(value)
-        UserDefaults.standard.set(spectrumBandSeparation, forKey: Self.spectrumBandSeparationKey)
-        spectrumAnalyzer.setBandSeparation(spectrumBandSeparation)
+        spectrumSettings.bandSeparation = Self.clampedBandSeparation(value)
+        persistSpectrumSettings()
+        spectrumAnalyzer.setBandSeparation(spectrumSettings.bandSeparation)
     }
 
     func showSpectrumAnalyzer() {
         spectrumPresentationHandler?()
+    }
+
+    func showSpectrumSettings() { spectrumSettingsPresentationHandler?() }
+
+    func updateSpectrumSettings(_ settings: SpectrumAnalyzerSettings) {
+        var sanitized = settings
+        sanitized.sanitize()
+        let signalPathChanged = sanitized.fftSize != spectrumSettings.fftSize
+            || sanitized.snapshotHopFrames != spectrumSettings.snapshotHopFrames
+            || sanitized.refreshIntervalMilliseconds != spectrumSettings.refreshIntervalMilliseconds
+            || sanitized.bandCount != spectrumSettings.bandCount
+        spectrumSettings = sanitized
+        persistSpectrumSettings()
+        spectrumAnalyzer.setDecayRates(bandFallDbPerSecond: sanitized.bandFallDbPerSecond, peakFallDbPerSecond: sanitized.peakFallDbPerSecond)
+        spectrumAnalyzer.setBandSeparation(sanitized.bandSeparation)
+        spectrumAnalyzer.setPeakHoldSeconds(sanitized.peakHoldSeconds)
+        if signalPathChanged { rebuildSpectrumAnalyzer() }
     }
 
     func toggleSpectrumFullScreen() {
@@ -514,24 +521,71 @@ final class AppState: ObservableObject {
         }
     }
 
-    private static func persistedFallRate(forKey key: String, defaultValue: Double) -> Double {
-        guard UserDefaults.standard.object(forKey: key) != nil else { return defaultValue }
-        return clampedFallRate(UserDefaults.standard.double(forKey: key))
+    private static func persistedSpectrumSettings() -> SpectrumAnalyzerSettings {
+        if let data = UserDefaults.standard.data(forKey: spectrumSettingsKey),
+           var settings = try? JSONDecoder().decode(SpectrumAnalyzerSettings.self, from: data) {
+            settings.sanitize()
+            return settings
+        }
+
+        var settings = SpectrumAnalyzerSettings()
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: legacySpectrumBandFallKey) != nil {
+            settings.bandFallDbPerSecond = defaults.double(forKey: legacySpectrumBandFallKey)
+        }
+        if defaults.object(forKey: legacySpectrumPeakFallKey) != nil {
+            settings.peakFallDbPerSecond = defaults.double(forKey: legacySpectrumPeakFallKey)
+        }
+        if defaults.object(forKey: legacySpectrumBandSeparationKey) != nil {
+            settings.bandSeparation = defaults.double(forKey: legacySpectrumBandSeparationKey)
+        }
+        settings.sanitize()
+        if let data = try? JSONEncoder().encode(settings) {
+            defaults.set(data, forKey: spectrumSettingsKey)
+        }
+        return settings
     }
 
     private static func clampedFallRate(_ value: Double) -> Double {
         min(max(value, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
     }
 
-    private static func persistedBandSeparation() -> Double {
-        guard UserDefaults.standard.object(forKey: spectrumBandSeparationKey) != nil else {
-            return SpectrumAnalyzerTuning.defaultBandSeparation
-        }
-        return clampedBandSeparation(UserDefaults.standard.double(forKey: spectrumBandSeparationKey))
-    }
-
     private static func clampedBandSeparation(_ value: Double) -> Double {
         min(max(value, SpectrumAnalyzerTuning.bandSeparationRange.lowerBound), SpectrumAnalyzerTuning.bandSeparationRange.upperBound)
+    }
+
+    private func persistSpectrumSettings() {
+        guard let data = try? JSONEncoder().encode(spectrumSettings) else { return }
+        UserDefaults.standard.set(data, forKey: Self.spectrumSettingsKey)
+    }
+
+    private func configureSpectrumSnapshotDelivery() {
+        spectrumAnalyzer.onSnapshot = { [weak self, spectrumDelivery] snapshot in
+            guard let self else { return }
+            spectrumDelivery.submit(snapshot, performanceCounter: self.spectrumPerformanceCounter) { @MainActor [weak self] latestSnapshot in
+                self?.spectrum = latestSnapshot
+            }
+        }
+    }
+
+    private func rebuildSpectrumAnalyzer() {
+        let wasProcessing = isProcessing
+        if wasProcessing { audioPipeline.stop() }
+        spectrumAnalyzer.setEnabled(false)
+        spectrumAnalyzer = AudioSpectrumAnalyzer(settings: spectrumSettings)
+        configureSpectrumSnapshotDelivery()
+        spectrumAnalyzer.setEnabled(isSpectrumPresented)
+        audioPipeline = AudioPipeline(levelMeter: levelMeter, spectrumAnalyzer: spectrumAnalyzer, healthStore: healthStore)
+        guard wasProcessing else { return }
+        do {
+            try audioPipeline.start(settings: effectiveSettings())
+            hasError = false
+            updateStatusText()
+        } catch {
+            isProcessing = false
+            hasError = true
+            statusText = error.localizedDescription
+        }
     }
 
     private func persistAndApply() {

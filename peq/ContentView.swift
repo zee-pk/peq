@@ -154,7 +154,7 @@ struct ContentView: View {
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
-                                
+
                                 HStack(spacing: 12) {
                                     Slider(
                                         value: Binding(
@@ -189,36 +189,15 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         }
                         
-                        // Spectrum Analyzer Settings Group
+                        // Audio Health Group
                         GroupBox {
                             VStack(alignment: .leading, spacing: 12) {
-                                Label("Spectrum Analyzer", systemImage: "chart.bar.xaxis")
+                                Label("Audio Health", systemImage: "waveform.path.ecg")
                                     .font(.headline)
                                     .foregroundStyle(.primary)
 
-                                SpectrumFallRateControl(
-                                    title: "Band fall",
-                                    value: Binding(
-                                        get: { appState.spectrumBandFallDbPerSecond },
-                                        set: { appState.setSpectrumBandFallDbPerSecond($0) }
-                                    )
-                                )
+                                AudioHealthView(health: appState.audioHealth, isProcessing: appState.isProcessing)
 
-                                SpectrumFallRateControl(
-                                    title: "Peak fall",
-                                    value: Binding(
-                                        get: { appState.spectrumPeakFallDbPerSecond },
-                                        set: { appState.setSpectrumPeakFallDbPerSecond($0) }
-                                    )
-                                )
-
-                                SpectrumSeparationControl(
-                                    value: Binding(
-                                        get: { appState.spectrumBandSeparation },
-                                        set: { appState.setSpectrumBandSeparation($0) }
-                                    )
-                                )
-                                
                                 Spacer()
                             }
                             .padding(4)
@@ -364,66 +343,47 @@ struct ContentView: View {
     }
 }
 
-private struct SpectrumFallRateControl: View {
-    let title: String
-    let value: Binding<Double>
+private struct AudioHealthView: View {
+    let health: AudioHealthSnapshot
+    let isProcessing: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 10) {
-                Slider(
-                    value: value,
-                    in: SpectrumAnalyzerTuning.fallRateRange,
-                    step: 1
-                )
-                NumberField(
-                    value: value,
-                    range: SpectrumAnalyzerTuning.fallRateRange,
-                    step: 1,
-                    fractionDigits: 0,
-                    width: 52
-                )
-                Text("dB/s")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30, alignment: .leading)
+        Grid(horizontalSpacing: 24, verticalSpacing: 8) {
+            GridRow {
+                healthItem("Tap SR", sampleRateText(health.tapSampleRate))
+                healthItem("Out SR", sampleRateText(health.outputSampleRate))
+                healthItem("Out Pk", peakText(health.outputPeak))
             }
+            GridRow {
+                healthItem("Tap BD", bitDepthText(health.tapBitDepth))
+                healthItem("Out BD", bitDepthText(health.outputBitDepth))
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(isProcessing ? .secondary : .tertiary)
+    }
+
+    private func healthItem(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 4) {
+            Text(label).foregroundStyle(.tertiary)
+            Spacer()
+            Text(value).monospacedDigit().foregroundStyle(.primary)
         }
     }
-}
 
-private struct SpectrumSeparationControl: View {
-    let value: Binding<Double>
+    private func sampleRateText(_ sampleRate: Double) -> String {
+        guard sampleRate > 0 else { return "-" }
+        return String(format: "%.1f k", sampleRate / 1_000)
+    }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Band separation")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+    private func peakText(_ peak: Float) -> String {
+        guard peak > 0 else { return "-inf" }
+        return String(format: "%.1f dB", 20 * log10(Double(peak)))
+    }
 
-            HStack(spacing: 10) {
-                Slider(
-                    value: value,
-                    in: SpectrumAnalyzerTuning.bandSeparationRange,
-                    step: 0.05
-                )
-                NumberField(
-                    value: value,
-                    range: SpectrumAnalyzerTuning.bandSeparationRange,
-                    step: 0.05,
-                    fractionDigits: 2,
-                    width: 52
-                )
-                Text("amount")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 30, alignment: .leading)
-            }
-        }
+    private func bitDepthText(_ bitDepth: Int) -> String {
+        guard bitDepth > 0 else { return "-" }
+        return "\(bitDepth)-bit"
     }
 }
 

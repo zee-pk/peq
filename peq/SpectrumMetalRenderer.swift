@@ -2,6 +2,10 @@ import AppKit
 import MetalKit
 import SwiftUI
 
+enum SpectrumMetalStyle {
+    static let minimumBandCapacity = 256
+}
+
 enum SpectrumPlotLayout {
     static let channelGap: CGFloat = 16
     static let plotLeft: CGFloat = 70
@@ -25,6 +29,7 @@ enum SpectrumPlotLayout {
 
 struct SpectrumMetalView: NSViewRepresentable {
     let snapshot: SpectrumSnapshot
+    let settings: SpectrumAnalyzerSettings
     let onRenderFPS: (Double) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -51,7 +56,7 @@ struct SpectrumMetalView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: MTKView, context: Context) {
-        context.coordinator.renderer?.submit(snapshot)
+        context.coordinator.renderer?.submit(snapshot, settings: settings)
         context.coordinator.renderer?.onMeasuredFPS = onRenderFPS
         context.coordinator.renderer?.updatePreferredFrameRate()
     }
@@ -98,6 +103,50 @@ private struct SpectrumVertex {
     let isMeter: Float
 }
 
+private struct SpectrumStyleUniforms {
+    let darkRed: SIMD4<Float>
+    let orangeRed: SIMD4<Float>
+    let orange: SIMD4<Float>
+    let yellow: SIMD4<Float>
+    let thresholds: SIMD4<Float>
+    let segments: SIMD4<Float>
+
+    init(settings: SpectrumAnalyzerSettings) {
+        let darkRedSize = Self.sanitizedRegionSize(Float(settings.darkRedRegionPercent))
+        let orangeRedSize = Self.sanitizedRegionSize(Float(settings.orangeRedRegionPercent))
+        let orangeSize = Self.sanitizedRegionSize(Float(settings.orangeRegionPercent))
+        let yellowSize = Self.sanitizedRegionSize(Float(settings.yellowRegionPercent))
+        let requestedTotal = darkRedSize + orangeRedSize + orangeSize + yellowSize
+
+        let regionSizes: SIMD4<Float>
+        if requestedTotal.isFinite, requestedTotal > 0 {
+            regionSizes = SIMD4(darkRedSize, orangeRedSize, orangeSize, yellowSize) / requestedTotal
+        } else {
+            regionSizes = SIMD4(0.38, 0.22, 0.20, 0.20)
+        }
+
+        let requestedGap = Float(settings.ledGapPercent)
+        let gapPercent = requestedGap.isFinite ? min(100, max(0, requestedGap)) : 18
+        let requestedSegmentCount = Float(settings.ledSegmentCount)
+        let segmentCount = requestedSegmentCount.isFinite ? max(1, requestedSegmentCount) : 48
+
+        darkRed = SIMD4(Self.color(settings.darkRedRGB), 1)
+        orangeRed = SIMD4(Self.color(settings.orangeRedRGB), 1)
+        orange = SIMD4(Self.color(settings.orangeRGB), 1)
+        yellow = SIMD4(Self.color(settings.yellowRGB), 1)
+        thresholds = SIMD4(regionSizes.x, regionSizes.x + regionSizes.y, regionSizes.x + regionSizes.y + regionSizes.z, 0)
+        segments = SIMD4(segmentCount, gapPercent / 100, 0, 0)
+    }
+
+    private static func sanitizedRegionSize(_ value: Float) -> Float {
+        value.isFinite ? max(0, value) : 0
+    }
+
+    private static func color(_ values: [Double]) -> SIMD3<Float> {
+        SIMD3(Float(values.indices.contains(0) ? values[0] : 0), Float(values.indices.contains(1) ? values[1] : 0), Float(values.indices.contains(2) ? values[2] : 0))
+    }
+}
+
 private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -117,6 +166,15 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         float isMeter;
     };
 
+    struct SpectrumStyle {
+        float4 darkRed;
+        float4 orangeRed;
+        float4 orange;
+        float4 yellow;
+        float4 thresholds;
+        float4 segments;
+    };
+
     vertex SpectrumRasterData spectrumVertex(const device SpectrumVertex *vertices [[buffer(0)]], uint vertexID [[vertex_id]]) {
         SpectrumRasterData out;
         out.position = float4(vertices[vertexID].position, 0.0, 1.0);
@@ -126,25 +184,22 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         return out;
     }
 
-    fragment float4 spectrumFragment(SpectrumRasterData in [[stage_in]]) {
+    fragment float4 spectrumFragment(SpectrumRasterData in [[stage_in]], constant SpectrumStyle &style [[buffer(1)]]) {
         if (in.isMeter > 0.5) {
-            constexpr float segmentCount = 48.0;
-            if (fract(in.meterCoordinate.y * segmentCount) < 0.18) {
+            if (fract(in.meterCoordinate.y * style.segments.x) < style.segments.y) {
                 return float4(0.0, 0.0, 0.0, 1.0);
             }
 
             float level = clamp(in.meterCoordinate.y, 0.0, 1.0);
-            float3 red = float3(1.0, 0.055, 0.075);
-            float3 orange = float3(1.0, 0.28, 0.055);
-            float3 yellow = float3(1.0, 0.82, 0.12);
-            float3 warmWhite = float3(1.0, 0.99, 0.72);
             float3 meterColor;
-            if (level < 0.52) {
-                meterColor = mix(red, orange, level / 0.52);
-            } else if (level < 0.82) {
-                meterColor = mix(orange, yellow, (level - 0.52) / 0.30);
+            if (level < style.thresholds.x) {
+                meterColor = style.darkRed.rgb;
+            } else if (level < style.thresholds.y) {
+                meterColor = style.orangeRed.rgb;
+            } else if (level < style.thresholds.z) {
+                meterColor = style.orange.rgb;
             } else {
-                meterColor = mix(yellow, warmWhite, (level - 0.82) / 0.18);
+                meterColor = style.yellow.rgb;
             }
             float centerGlow = 0.90 + (0.10 * (1.0 - abs((in.meterCoordinate.x * 2.0) - 1.0)));
             return float4(meterColor * centerGlow, 0.98);
@@ -153,7 +208,6 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
     }
     """
 
-    private static let maxVertices = 2_048
     private static let dbTicks: [Float] = [0, -12, -24, -36, -48, -60, -72, -84]
     private static let frequencyTicks: [Float] = [20, 100, 1_000, 5_000, 10_000, 20_000]
 
@@ -161,11 +215,13 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
     private let vertexBuffers: [MTLBuffer]
+    private let vertexCapacity: Int
     private let inFlightSemaphore = DispatchSemaphore(value: 3)
     private var bufferIndex = 0
     private var vertices: [SpectrumVertex] = []
     private let snapshotLock = NSLock()
     private var latestSnapshot = SpectrumSnapshot.empty
+    private var latestSettings = SpectrumAnalyzerSettings()
     private let measurementLock = NSLock()
     private var measuredFrameCount = 0
     private var measuredFrameStart = CACurrentMediaTime()
@@ -196,7 +252,9 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
         let pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
-        let bufferLength = Self.maxVertices * MemoryLayout<SpectrumVertex>.stride
+        let supportedBandCount = SpectrumMetalStyle.minimumBandCapacity
+        let vertexCapacity = (supportedBandCount * 24) + 256
+        let bufferLength = vertexCapacity * MemoryLayout<SpectrumVertex>.stride
         let buffers = (0..<3).compactMap { _ in device.makeBuffer(length: bufferLength, options: .storageModeShared) }
         guard buffers.count == 3 else { throw SpectrumMetalRendererError.vertexBufferCreationFailed }
 
@@ -204,8 +262,9 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         self.commandQueue = commandQueue
         self.pipelineState = pipelineState
         self.vertexBuffers = buffers
+        self.vertexCapacity = vertexCapacity
         super.init()
-        vertices.reserveCapacity(Self.maxVertices)
+        vertices.reserveCapacity(vertexCapacity)
 
         view.colorPixelFormat = .bgra8Unorm
         view.clearColor = MTLClearColorMake(0, 0, 0, 1)
@@ -216,9 +275,10 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         view.delegate = self
     }
 
-    func submit(_ snapshot: SpectrumSnapshot) {
+    func submit(_ snapshot: SpectrumSnapshot, settings: SpectrumAnalyzerSettings) {
         snapshotLock.lock()
         latestSnapshot = snapshot
+        latestSettings = settings
         snapshotLock.unlock()
     }
 
@@ -237,6 +297,21 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
               let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
         inFlightSemaphore.wait()
+
+        snapshotLock.lock()
+        let snapshot = latestSnapshot
+        let settings = latestSettings
+        snapshotLock.unlock()
+
+        vertices.removeAll(keepingCapacity: true)
+        appendScene(snapshot: snapshot, settings: settings, size: view.bounds.size, to: &vertices)
+        guard vertices.count <= vertexCapacity else {
+            NSLog("Spectrum Metal vertex capacity exceeded: generated %d vertices, capacity is %d.", vertices.count, vertexCapacity)
+            encoder.endEncoding()
+            inFlightSemaphore.signal()
+            return
+        }
+
         commandBuffer.addCompletedHandler { [weak self, inFlightSemaphore] completedBuffer in
             inFlightSemaphore.signal()
             guard completedBuffer.status == .completed else {
@@ -246,18 +321,6 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
                 return
             }
             self?.recordCompletedFrame()
-        }
-
-        snapshotLock.lock()
-        let snapshot = latestSnapshot
-        snapshotLock.unlock()
-
-        vertices.removeAll(keepingCapacity: true)
-        appendScene(snapshot: snapshot, size: view.bounds.size, to: &vertices)
-        guard vertices.count <= Self.maxVertices else {
-            encoder.endEncoding()
-            commandBuffer.commit()
-            return
         }
 
         let vertexBuffer = vertexBuffers[bufferIndex]
@@ -270,6 +333,8 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
 
         encoder.setRenderPipelineState(pipelineState)
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        var style = SpectrumStyleUniforms(settings: settings)
+        encoder.setFragmentBytes(&style, length: MemoryLayout<SpectrumStyleUniforms>.stride, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count)
         encoder.endEncoding()
         commandBuffer.present(drawable)
@@ -294,14 +359,14 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func appendScene(snapshot: SpectrumSnapshot, size: CGSize, to vertices: inout [SpectrumVertex]) {
+    private func appendScene(snapshot: SpectrumSnapshot, settings: SpectrumAnalyzerSettings, size: CGSize, to vertices: inout [SpectrumVertex]) {
         guard size.width > 0, size.height > 0 else { return }
         let plots = SpectrumPlotLayout.plotRects(in: size)
         let channels = [(snapshot.left, snapshot.leftPeaks), (snapshot.right, snapshot.rightPeaks)]
 
         for (plot, channel) in zip(plots, channels) {
             appendGrid(in: plot, canvasSize: size, to: &vertices)
-            appendBars(values: channel.0, peaks: channel.1, in: plot, canvasSize: size, to: &vertices)
+            appendBars(values: channel.0, peaks: channel.1, settings: settings, in: plot, canvasSize: size, to: &vertices)
             appendBorder(around: plot, canvasSize: size, to: &vertices)
         }
     }
@@ -319,14 +384,15 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func appendBars(values: [Float], peaks: [Float], in plot: CGRect, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
+    private func appendBars(values: [Float], peaks: [Float], settings: SpectrumAnalyzerSettings, in plot: CGRect, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
         let count = min(values.count, peaks.count)
         guard count > 0 else { return }
         let cellWidth = plot.width / CGFloat(count)
+        let gap = min(max(0, CGFloat(settings.bandGapPixels)), max(0, cellWidth - 1))
         let peakColor = SIMD4<Float>(1, 1, 1, 0.96)
         for index in 0..<count {
-            let x = plot.minX + CGFloat(index) * cellWidth + 1
-            let width = max(1, cellWidth - 2)
+            let x = plot.minX + CGFloat(index) * cellWidth + (gap / 2)
+            let width = max(1, cellWidth - gap)
             let y = yPosition(values[index], in: plot)
             appendRectangle(
                 CGRect(x: x, y: y, width: width, height: plot.maxY - y),

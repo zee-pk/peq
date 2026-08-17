@@ -21,6 +21,7 @@ final class AudioPipeline {
     private let tapManager = AudioTapManager()
     private let levelMeter: AudioLevelMeter
     private let spectrumAnalyzer: AudioSpectrumAnalyzer
+    private let spectrumTapBufferSize: AVAudioFrameCount
     private let healthStore: AudioHealthStore
 
     private var engine: AVAudioEngine?
@@ -36,6 +37,7 @@ final class AudioPipeline {
         self.levelMeter = levelMeter
         self.spectrumAnalyzer = spectrumAnalyzer
         self.healthStore = healthStore
+        self.spectrumTapBufferSize = AVAudioFrameCount(spectrumAnalyzer.snapshotIntervalFrames)
     }
 
     var isRunning: Bool {
@@ -146,7 +148,7 @@ final class AudioPipeline {
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
         engine.mainMixerNode.installTap(
             onBus: 0,
-            bufferSize: AVAudioFrameCount(SpectrumAnalyzerTuning.snapshotHopFrames),
+            bufferSize: spectrumTapBufferSize,
             format: nil
         ) { [levelMeter, spectrumAnalyzer] buffer, _ in
             levelMeter.process(buffer)
