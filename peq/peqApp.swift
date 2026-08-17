@@ -272,6 +272,7 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 @MainActor
 private final class VolumeHotkeyMonitor {
     private weak var appState: AppState?
+    private let gainHUDController = GainHUDController()
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
@@ -372,12 +373,15 @@ private final class VolumeHotkeyMonitor {
         switch Int32(keyCode) {
         case NX_KEYTYPE_SOUND_UP:
             appState.adjustOutputGain(by: 1)
+            gainHUDController.show(gainDb: appState.settings.outputGainDb)
             return nil
         case NX_KEYTYPE_SOUND_DOWN:
             appState.adjustOutputGain(by: -1)
+            gainHUDController.show(gainDb: appState.settings.outputGainDb)
             return nil
         case NX_KEYTYPE_MUTE:
             appState.setOutputGain(EQLimits.outputGainDb.lowerBound)
+            gainHUDController.show(gainDb: appState.settings.outputGainDb)
             return nil
         default:
             return Unmanaged.passUnretained(event)
