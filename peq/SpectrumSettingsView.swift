@@ -17,8 +17,10 @@ struct SpectrumSettingsView: View {
                 IntegerSetting("Refresh interval", value: $draft.refreshIntervalMilliseconds, range: SpectrumAnalyzerSettings.refreshIntervalRange, suffix: "ms")
                 IntegerSetting("Bands", value: $draft.bandCount, range: SpectrumAnalyzerSettings.bandCountRange, suffix: "bands")
                 DecimalSetting("Band gap", value: $draft.bandGapPixels, range: SpectrumAnalyzerSettings.bandGapRange, step: 1, suffix: "px")
+                DecimalSetting("Minimum level", value: $draft.minimumDb, range: SpectrumAnalyzerSettings.minimumDbRange, step: 1, suffix: "dB")
+                DecimalSetting("Maximum level", value: $draft.maximumDb, range: SpectrumAnalyzerSettings.maximumDbRange, step: 1, suffix: "dB")
                 DecimalSetting("Peak hold", value: $draft.peakHoldSeconds, range: SpectrumAnalyzerSettings.peakHoldRange, step: 0.05, suffix: "s")
-                Text("FFT size, hop, refresh interval, and band count rebuild the analyzer when applied.")
+                Text("FFT size, hop, refresh interval, band count, and dB range rebuild the analyzer when applied.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

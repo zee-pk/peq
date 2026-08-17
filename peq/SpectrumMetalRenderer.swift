@@ -208,7 +208,6 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
     }
     """
 
-    private static let dbTicks: [Float] = [0, -12, -24, -36, -48, -60, -72, -84]
     private static let frequencyTicks: [Float] = [20, 100, 1_000, 5_000, 10_000, 20_000]
 
     private weak var view: MTKView?
@@ -365,17 +364,17 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         let channels = [(snapshot.left, snapshot.leftPeaks), (snapshot.right, snapshot.rightPeaks)]
 
         for (plot, channel) in zip(plots, channels) {
-            appendGrid(in: plot, canvasSize: size, to: &vertices)
+            appendGrid(in: plot, settings: settings, canvasSize: size, to: &vertices)
             appendBars(values: channel.0, peaks: channel.1, settings: settings, in: plot, canvasSize: size, to: &vertices)
             appendBorder(around: plot, canvasSize: size, to: &vertices)
         }
     }
 
-    private func appendGrid(in plot: CGRect, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
+    private func appendGrid(in plot: CGRect, settings: SpectrumAnalyzerSettings, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
         let horizontal = SIMD4<Float>(1, 1, 1, 0.16)
         let vertical = SIMD4<Float>(1, 1, 1, 0.10)
-        for db in Self.dbTicks {
-            let y = yPosition(db, in: plot)
+        for db in SpectrumAnalyzerTuning.dbTicks(minimum: Float(settings.minimumDb), maximum: Float(settings.maximumDb)) {
+            let y = yPosition(db, settings: settings, in: plot)
             appendRectangle(CGRect(x: plot.minX, y: y, width: plot.width, height: 1), topColor: horizontal, bottomColor: horizontal, canvasSize: canvasSize, to: &vertices)
         }
         for frequency in Self.frequencyTicks {
@@ -393,17 +392,17 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         for index in 0..<count {
             let x = plot.minX + CGFloat(index) * cellWidth + (gap / 2)
             let width = max(1, cellWidth - gap)
-            let y = yPosition(values[index], in: plot)
+            let y = yPosition(values[index], settings: settings, in: plot)
             appendRectangle(
                 CGRect(x: x, y: y, width: width, height: plot.maxY - y),
                 topColor: .zero,
                 bottomColor: .zero,
-                meterTopLevel: normalizedLevel(values[index]),
+                meterTopLevel: normalizedLevel(values[index], settings: settings),
                 meterBottomLevel: 0,
                 canvasSize: canvasSize,
                 to: &vertices
             )
-            let peakY = yPosition(peaks[index], in: plot)
+            let peakY = yPosition(peaks[index], settings: settings, in: plot)
             appendRectangle(CGRect(x: x, y: peakY, width: width, height: 2), topColor: peakColor, bottomColor: peakColor, canvasSize: canvasSize, to: &vertices)
         }
     }
@@ -443,15 +442,19 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         SIMD2(Float((point.x / canvasSize.width) * 2 - 1), Float(1 - (point.y / canvasSize.height) * 2))
     }
 
-    private func yPosition(_ db: Float, in plot: CGRect) -> CGFloat {
-        let clamped = min(SpectrumSnapshot.ceilingDb, max(SpectrumSnapshot.floorDb, db))
-        let fraction = CGFloat((clamped - SpectrumSnapshot.floorDb) / (SpectrumSnapshot.ceilingDb - SpectrumSnapshot.floorDb))
+    private func yPosition(_ db: Float, settings: SpectrumAnalyzerSettings, in plot: CGRect) -> CGFloat {
+        let minimumDb = Float(settings.minimumDb)
+        let maximumDb = Float(settings.maximumDb)
+        let clamped = min(maximumDb, max(minimumDb, db))
+        let fraction = CGFloat((clamped - minimumDb) / (maximumDb - minimumDb))
         return plot.maxY - fraction * plot.height
     }
 
-    private func normalizedLevel(_ db: Float) -> Float {
-        let clamped = min(SpectrumSnapshot.ceilingDb, max(SpectrumSnapshot.floorDb, db))
-        return (clamped - SpectrumSnapshot.floorDb) / (SpectrumSnapshot.ceilingDb - SpectrumSnapshot.floorDb)
+    private func normalizedLevel(_ db: Float, settings: SpectrumAnalyzerSettings) -> Float {
+        let minimumDb = Float(settings.minimumDb)
+        let maximumDb = Float(settings.maximumDb)
+        let clamped = min(maximumDb, max(minimumDb, db))
+        return (clamped - minimumDb) / (maximumDb - minimumDb)
     }
 
     private func xPosition(_ frequency: Float, in plot: CGRect) -> CGFloat {

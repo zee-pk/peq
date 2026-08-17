@@ -463,6 +463,8 @@ final class AppState: ObservableObject {
             || sanitized.snapshotHopFrames != spectrumSettings.snapshotHopFrames
             || sanitized.refreshIntervalMilliseconds != spectrumSettings.refreshIntervalMilliseconds
             || sanitized.bandCount != spectrumSettings.bandCount
+            || sanitized.minimumDb != spectrumSettings.minimumDb
+            || sanitized.maximumDb != spectrumSettings.maximumDb
         spectrumSettings = sanitized
         persistSpectrumSettings()
         spectrumAnalyzer.setDecayRates(bandFallDbPerSecond: sanitized.bandFallDbPerSecond, peakFallDbPerSecond: sanitized.peakFallDbPerSecond)
