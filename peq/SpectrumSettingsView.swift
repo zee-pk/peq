@@ -8,6 +8,30 @@ struct SpectrumSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Layout") {
+                Picker("Spectrum layout", selection: $draft.layoutMode) {
+                    ForEach(SpectrumLayoutMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Track Info + Spectrum shows Apple Music details above a spectrum occupying the lower 60% of the screen.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Signal") {
+                Picker("Spectrum audio", selection: $draft.audioSource) {
+                    ForEach(SpectrumAudioSource.allCases) { source in
+                        Text(source.title).tag(source)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Pre-EQ shows the incoming signal before equalization. Post-EQ shows the processed output.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Analysis") {
                 Picker("FFT size", selection: $draft.fftSize) {
                     ForEach(SpectrumAnalyzerSettings.fftSizes, id: \.self) { size in

@@ -100,6 +100,7 @@ final class AppState: ObservableObject {
     @Published private(set) var spectrum = SpectrumSnapshot.empty
     @Published private(set) var spectrumPerformance = SpectrumPerformanceSnapshot.zero
     @Published private(set) var isSpectrumFullScreen = false
+    @Published private(set) var isSpectrumPresented = false
     @Published private(set) var spectrumSettings: SpectrumAnalyzerSettings
     @Published private(set) var spectrumLEDProfiles: [SpectrumLEDProfile]
 
@@ -107,16 +108,19 @@ final class AppState: ObservableObject {
     private let deviceManager = DeviceManager()
     private let healthStore = AudioHealthStore()
     private lazy var levelMeter = AudioLevelMeter(healthStore: healthStore)
-    private var spectrumAnalyzer: AudioSpectrumAnalyzer
-    private lazy var audioPipeline = AudioPipeline(levelMeter: levelMeter, spectrumAnalyzer: spectrumAnalyzer, healthStore: healthStore)
+    private lazy var spectrumAnalyzer = makeSpectrumAnalyzer(settings: spectrumSettings)
+    private lazy var spectrumInput = SpectrumAnalyzerInput(
+        analyzer: spectrumAnalyzer,
+        audioSource: spectrumSettings.audioSource
+    )
+    private lazy var audioPipeline = AudioPipeline(levelMeter: levelMeter, spectrumInput: spectrumInput, healthStore: healthStore)
     private var levelTimer: Timer?
     private var isRebuildingAudioPath = false
     private var spectrumPresentationHandler: (() -> Void)?
     private var spectrumFullScreenHandler: (() -> Void)?
     private var spectrumSettingsPresentationHandler: (() -> Void)?
-    private var isSpectrumPresented = false
-    private let spectrumDelivery = LatestSpectrumDelivery()
     private let spectrumPerformanceCounter = SpectrumPerformanceCounter()
+    private var spectrumAnalyzerDeliveryGeneration = 0
     private var spectrumPerformanceTimer: Timer?
     private var spectrumPerformanceSampleTime = CACurrentMediaTime()
     private var latestSpectrumRenderFPS = 0.0
@@ -135,9 +139,8 @@ final class AppState: ObservableObject {
         let persistedSpectrumSettings = Self.persistedSpectrumSettings()
         self.spectrumSettings = persistedSpectrumSettings
         self.spectrumLEDProfiles = Self.persistedSpectrumLEDProfiles()
-        self.spectrumAnalyzer = AudioSpectrumAnalyzer(settings: persistedSpectrumSettings)
+        _ = spectrumInput
         refreshOutputDevices()
-        configureSpectrumSnapshotDelivery()
     }
 
     var isConfiguredOutputDeviceActive: Bool {
@@ -151,7 +154,10 @@ final class AppState: ObservableObject {
     }
 
     var isOutputGainControlActive: Bool {
-        isProcessing && !settings.bypass && isVolumeHotkeyRemappingAvailable
+        isProcessing
+            && !settings.bypass
+            && isConfiguredOutputDeviceActive
+            && isVolumeHotkeyRemappingAvailable
     }
 
     var selectedOutputDevicePickerItems: [OutputDevicePickerItem] {
@@ -462,7 +468,7 @@ final class AppState: ObservableObject {
     func updateSpectrumSettings(_ settings: SpectrumAnalyzerSettings) {
         var sanitized = settings
         sanitized.sanitize()
-        let signalPathChanged = sanitized.fftSize != spectrumSettings.fftSize
+        let analyzerStructureChanged = sanitized.fftSize != spectrumSettings.fftSize
             || sanitized.snapshotHopFrames != spectrumSettings.snapshotHopFrames
             || sanitized.refreshIntervalMilliseconds != spectrumSettings.refreshIntervalMilliseconds
             || sanitized.bandCount != spectrumSettings.bandCount
@@ -473,7 +479,11 @@ final class AppState: ObservableObject {
         spectrumAnalyzer.setDecayRates(bandFallDbPerSecond: sanitized.bandFallDbPerSecond, peakFallDbPerSecond: sanitized.peakFallDbPerSecond)
         spectrumAnalyzer.setBandSeparation(sanitized.bandSeparation)
         spectrumAnalyzer.setPeakHoldSeconds(sanitized.peakHoldSeconds)
-        if signalPathChanged { rebuildSpectrumAnalyzer() }
+        if analyzerStructureChanged {
+            rebuildSpectrumAnalyzer()
+        } else {
+            spectrumInput.setAudioSource(sanitized.audioSource)
+        }
     }
 
     func saveSpectrumLEDProfile(name: String, settings: SpectrumAnalyzerSettings) {
@@ -592,33 +602,27 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(data, forKey: Self.spectrumLEDProfilesKey)
     }
 
-    private func configureSpectrumSnapshotDelivery() {
-        spectrumAnalyzer.onSnapshot = { [weak self, spectrumDelivery] snapshot in
-            guard let self else { return }
-            spectrumDelivery.submit(snapshot, performanceCounter: self.spectrumPerformanceCounter) { @MainActor [weak self] latestSnapshot in
-                self?.spectrum = latestSnapshot
+    private func makeSpectrumAnalyzer(settings: SpectrumAnalyzerSettings) -> AudioSpectrumAnalyzer {
+        spectrumAnalyzerDeliveryGeneration &+= 1
+        let deliveryGeneration = spectrumAnalyzerDeliveryGeneration
+        let delivery = LatestSpectrumDelivery()
+        let performanceCounter = spectrumPerformanceCounter
+        return AudioSpectrumAnalyzer(settings: settings) { [weak self, delivery, performanceCounter] snapshot in
+            delivery.submit(snapshot, performanceCounter: performanceCounter) { @MainActor [weak self] latestSnapshot in
+                guard let self,
+                      self.spectrumAnalyzerDeliveryGeneration == deliveryGeneration else { return }
+                self.spectrum = latestSnapshot
             }
         }
     }
 
     private func rebuildSpectrumAnalyzer() {
-        let wasProcessing = isProcessing
-        if wasProcessing { audioPipeline.stop() }
         spectrumAnalyzer.setEnabled(false)
-        spectrumAnalyzer = AudioSpectrumAnalyzer(settings: spectrumSettings)
-        configureSpectrumSnapshotDelivery()
-        spectrumAnalyzer.setEnabled(isSpectrumPresented)
-        audioPipeline = AudioPipeline(levelMeter: levelMeter, spectrumAnalyzer: spectrumAnalyzer, healthStore: healthStore)
-        guard wasProcessing else { return }
-        do {
-            try audioPipeline.start(settings: effectiveSettings())
-            hasError = false
-            updateStatusText()
-        } catch {
-            isProcessing = false
-            hasError = true
-            statusText = error.localizedDescription
-        }
+
+        let replacement = makeSpectrumAnalyzer(settings: spectrumSettings)
+        replacement.setEnabled(isSpectrumPresented)
+        spectrumInput.replaceAnalyzer(replacement, audioSource: spectrumSettings.audioSource)
+        spectrumAnalyzer = replacement
     }
 
     private func persistAndApply() {

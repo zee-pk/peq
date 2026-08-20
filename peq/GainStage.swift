@@ -2,6 +2,8 @@ import Foundation
 
 enum GainStage {
     static func protectedGlobalGainDb(for settings: EQSettings) -> Double {
+        guard !settings.bypass else { return 0 }
+
         let outputGain = EQLimits.clamp(settings.outputGainDb, to: EQLimits.outputGainDb)
         return outputGain - positiveBoostHeadroomDb(for: settings)
     }
