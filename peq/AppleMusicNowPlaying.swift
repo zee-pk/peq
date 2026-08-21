@@ -4,14 +4,32 @@ import Foundation
 import SwiftUI
 
 struct AppleMusicTrackInfo: Equatable {
-    let title: String
-    let album: String
-    let artist: String
+    enum Identity: Equatable {
+        case persistentID(String)
+        case metadata(title: String?, album: String?, artist: String?, durationSeconds: Int?)
+    }
+
+    let persistentID: String?
+    let title: String?
+    let album: String?
+    let artist: String?
     /// Library metadata reported by Music. This is not the active streaming bitrate.
     let libraryBitrateKbps: Int?
     let sampleRateHz: Int?
     let musicKind: String?
     let durationSeconds: TimeInterval?
+
+    var identity: Identity {
+        if let persistentID {
+            return .persistentID(persistentID)
+        }
+        return .metadata(
+            title: title,
+            album: album,
+            artist: artist,
+            durationSeconds: durationSeconds.map { Int($0.rounded()) }
+        )
+    }
 }
 
 enum AppleMusicNowPlayingState: Equatable {
@@ -98,7 +116,12 @@ final class AppleMusicNowPlayingProvider: ObservableObject {
             on error
                 set trackKind to ""
             end try
-            return {"playing", trackTitle, trackAlbum, trackArtist, trackDuration, trackBitrate, trackSampleRate, trackKind}
+            try
+                set trackPersistentID to persistent ID of activeTrack
+            on error
+                set trackPersistentID to ""
+            end try
+            return {"playing", trackTitle, trackAlbum, trackArtist, trackDuration, trackBitrate, trackSampleRate, trackKind, trackPersistentID}
         end tell
         """
 
@@ -116,20 +139,22 @@ final class AppleMusicNowPlayingProvider: ObservableObject {
         }
         guard status == "playing" else { return .nothingPlaying }
 
-        let title = descriptor.atIndex(2)?.stringValue ?? "Unknown Title"
-        let album = descriptor.atIndex(3)?.stringValue ?? "Unknown Album"
-        let artist = descriptor.atIndex(4)?.stringValue ?? "Unknown Artist"
+        let title = nonEmptyString(from: descriptor.atIndex(2))
+        let album = nonEmptyString(from: descriptor.atIndex(3))
+        let artist = nonEmptyString(from: descriptor.atIndex(4))
         let duration = positiveDouble(from: descriptor.atIndex(5))
         let bitrate = positiveInt(from: descriptor.atIndex(6))
         let sampleRate = positiveInt(from: descriptor.atIndex(7))
-        let kind = descriptor.atIndex(8)?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let kind = nonEmptyString(from: descriptor.atIndex(8))
+        let persistentID = nonEmptyString(from: descriptor.atIndex(9))
         return .playing(AppleMusicTrackInfo(
+            persistentID: persistentID,
             title: title,
             album: album,
             artist: artist,
             libraryBitrateKbps: bitrate,
             sampleRateHz: sampleRate,
-            musicKind: kind.flatMap { $0.isEmpty ? nil : $0 },
+            musicKind: kind,
             durationSeconds: duration
         ))
     }
@@ -144,6 +169,12 @@ final class AppleMusicNowPlayingProvider: ObservableObject {
         guard let value = positiveDouble(from: descriptor), value <= Double(Int.max) else { return nil }
         return Int(value.rounded())
     }
+
+    private nonisolated static func nonEmptyString(from descriptor: NSAppleEventDescriptor?) -> String? {
+        guard let value = descriptor?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return nil }
+        return value
+    }
 }
 
 struct AppleMusicTrackInfoView: View {
@@ -154,32 +185,39 @@ struct AppleMusicTrackInfoView: View {
             switch state {
             case .playing(let track):
                 VStack(spacing: 10) {
-                    Text(track.title)
-                        .font(.system(size: 38, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.68))
-                    Text(track.artist)
-                        .font(.system(size: 34, weight: .regular, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.52))
-                    Text(track.album)
-                        .font(.system(size: 26, weight: .light, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.42))
-                    HStack(spacing: 28) {
-                        metadata(Self.sampleRateText(track.sampleRateHz))
-                        Text("-").font(.system(size: 24, weight: .regular, design: .monospaced)).foregroundStyle(.white.opacity(0.28))
-                        metadata(Self.durationText(track.durationSeconds))
+                    if let title = track.title {
+                        Text(title)
+                            .font(.system(size: 38, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.68))
                     }
-                    .padding(.top, 8)
+                    if let artist = track.artist {
+                        Text(artist)
+                            .font(.system(size: 34, weight: .regular, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.52))
+                    }
+                    if let album = track.album {
+                        Text(album)
+                            .font(.system(size: 26, weight: .light, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.42))
+                    }
+                    if let sampleRate = Self.sampleRateText(track.sampleRateHz),
+                       let duration = Self.durationText(track.durationSeconds) {
+                        HStack(spacing: 28) {
+                            metadata(sampleRate)
+                            Text("-").font(.system(size: 24, weight: .regular, design: .monospaced)).foregroundStyle(.white.opacity(0.28))
+                            metadata(duration)
+                        }
+                        .padding(.top, 8)
+                    } else if let sampleRate = Self.sampleRateText(track.sampleRateHz) {
+                        metadata(sampleRate)
+                            .padding(.top, 8)
+                    } else if let duration = Self.durationText(track.durationSeconds) {
+                        metadata(duration)
+                            .padding(.top, 8)
+                    }
                 }
-            case .checking:
-                unavailableMessage("Checking Apple Music…")
-            case .musicNotRunning:
-                unavailableMessage("Apple Music is not running")
-            case .nothingPlaying:
-                unavailableMessage("No track is playing in Apple Music")
-            case .accessDenied:
-                unavailableMessage("Apple Music access denied · Enable peq in System Settings → Privacy & Security → Automation")
-            case .unavailable:
-                unavailableMessage("Apple Music track information is unavailable")
+            case .checking, .musicNotRunning, .nothingPlaying, .accessDenied, .unavailable:
+                EmptyView()
             }
         }
         .lineLimit(1)
@@ -193,22 +231,14 @@ struct AppleMusicTrackInfoView: View {
             .foregroundStyle(.white.opacity(0.28))
     }
 
-    private func unavailableMessage(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 30, weight: .light, design: .rounded))
-            .foregroundStyle(.white.opacity(0.42))
-    }
-
-    private static func durationText(_ duration: TimeInterval?) -> String {
-        guard let duration else { return unavailableValue }
+    private static func durationText(_ duration: TimeInterval?) -> String? {
+        guard let duration else { return nil }
         let totalSeconds = max(0, Int(duration.rounded()))
         return String(format: "%d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 
-    private static let unavailableValue = "Unavailable from Apple Music"
-
-    private static func sampleRateText(_ sampleRateHz: Int?) -> String {
-        guard let sampleRateHz, sampleRateHz > 0 else { return unavailableValue }
+    private static func sampleRateText(_ sampleRateHz: Int?) -> String? {
+        guard let sampleRateHz, sampleRateHz > 0 else { return nil }
         let sampleRateKHz = Double(sampleRateHz) / 1_000
         if sampleRateHz.isMultiple(of: 1_000) {
             return String(format: "%.0f kHz", sampleRateKHz)

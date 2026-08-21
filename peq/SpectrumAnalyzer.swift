@@ -78,6 +78,13 @@ enum SpectrumAudioSource: String, Codable, CaseIterable, Identifiable {
 }
 
 /// Stored independently from EQ presets because it controls the analyzer rather than audio processing.
+struct SpectrumLEDRegion: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var colorRGB: [Double]
+    /// Number of LED rows in this region. The final region always uses the remaining rows.
+    var rowCount: Int?
+}
+
 struct SpectrumAnalyzerSettings: Codable, Equatable {
     var layoutMode = SpectrumLayoutMode.fullSpectrum
     var audioSource = SpectrumAudioSource.postEQ
@@ -100,6 +107,12 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
     var orangeRedRegionPercent = 20.0
     var orangeRegionPercent = 20.0
     var yellowRegionPercent = 25.0
+    var ledRegions = [
+        SpectrumLEDRegion(colorRGB: [0.72, 0.015, 0.025], rowCount: 8),
+        SpectrumLEDRegion(colorRGB: [1.0, 0.12, 0.035], rowCount: 10),
+        SpectrumLEDRegion(colorRGB: [1.0, 0.42, 0.04], rowCount: 10),
+        SpectrumLEDRegion(colorRGB: [1.0, 0.86, 0.12], rowCount: nil)
+    ]
     var ledSegmentCount = 40.0
     var ledGapPercent = 20.0
 
@@ -113,6 +126,7 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
     static let maximumDbRange = -60.0...24.0
     static let minimumDbSpan = 12.0
     static let ledSegmentRange = 4.0...160.0
+    static let ledRegionCountRange = 1...10
     static let percentageRange = 0.0...100.0
 
     mutating func sanitize() {
@@ -139,17 +153,97 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
         orangeRedRegionPercent = Self.clampPercent(orangeRedRegionPercent)
         orangeRegionPercent = Self.clampPercent(orangeRegionPercent)
         yellowRegionPercent = Self.clampPercent(yellowRegionPercent)
-        ledSegmentCount = min(max(ledSegmentCount, Self.ledSegmentRange.lowerBound), Self.ledSegmentRange.upperBound)
+        ledSegmentCount = min(max(ledSegmentCount.rounded(), Self.ledSegmentRange.lowerBound), Self.ledSegmentRange.upperBound)
         ledGapPercent = Self.clampPercent(ledGapPercent)
+        sanitizeLEDRegions()
     }
 
-    private static func sanitizedColor(_ color: [Double]) -> [Double] {
+    private mutating func sanitizeLEDRegions() {
+        let totalRows = Int(ledSegmentCount)
+        let maximumRegionCount = min(Self.ledRegionCountRange.upperBound, totalRows)
+        if ledRegions.isEmpty {
+            ledRegions = [SpectrumLEDRegion(colorRGB: Self.defaultLEDColors[0], rowCount: nil)]
+        }
+        ledRegions = Array(ledRegions.prefix(maximumRegionCount))
+        for index in ledRegions.indices {
+            ledRegions[index].colorRGB = Self.sanitizedColor(ledRegions[index].colorRGB)
+        }
+
+        var remainingRows = totalRows
+        for index in ledRegions.indices.dropLast() {
+            let laterRegionCount = ledRegions.count - index - 1
+            let maximumRows = max(1, remainingRows - laterRegionCount)
+            let requestedRows = ledRegions[index].rowCount ?? max(1, remainingRows / (laterRegionCount + 1))
+            let rows = min(max(1, requestedRows), maximumRows)
+            ledRegions[index].rowCount = rows
+            remainingRows -= rows
+        }
+        ledRegions[ledRegions.index(before: ledRegions.endIndex)].rowCount = nil
+    }
+
+    mutating func setLEDRegionCount(_ requestedCount: Int) {
+        sanitize()
+        let totalRows = Int(ledSegmentCount)
+        let targetCount = min(max(requestedCount, Self.ledRegionCountRange.lowerBound), min(Self.ledRegionCountRange.upperBound, totalRows))
+        if targetCount < ledRegions.count {
+            ledRegions.removeLast(ledRegions.count - targetCount)
+        } else {
+            while ledRegions.count < targetCount {
+                let finalIndex = ledRegions.index(before: ledRegions.endIndex)
+                let allocatedRows = ledRegions.dropLast().compactMap(\.rowCount).reduce(0, +)
+                let remainingRows = max(1, totalRows - allocatedRows)
+                ledRegions[finalIndex].rowCount = max(1, remainingRows / 2)
+                let color = ledRegions[finalIndex].colorRGB
+                ledRegions.append(SpectrumLEDRegion(colorRGB: color, rowCount: nil))
+            }
+        }
+        sanitizeLEDRegions()
+    }
+
+    mutating func setLEDRegionRowCount(_ rowCount: Int, id: UUID) {
+        guard let index = ledRegions.firstIndex(where: { $0.id == id }), index < ledRegions.count - 1 else { return }
+        ledRegions[index].rowCount = rowCount
+        sanitizeLEDRegions()
+    }
+
+    mutating func setLEDRowCount(_ rowCount: Double) {
+        ledSegmentCount = rowCount
+        sanitize()
+    }
+
+    static func sanitizedColor(_ color: [Double]) -> [Double] {
         (0..<3).map { index in min(1, max(0, color.indices.contains(index) ? color[index] : 0)) }
     }
     private static func clampPercent(_ value: Double) -> Double { min(100, max(0, value)) }
 
+    private static let defaultLEDColors = [
+        [0.72, 0.015, 0.025], [1.0, 0.12, 0.035], [1.0, 0.42, 0.04], [1.0, 0.86, 0.12]
+    ]
+
+    static func migratedLEDRegions(colors: [[Double]], relativeSizes: [Double], rowCount: Int) -> [SpectrumLEDRegion] {
+        let safeRowCount = max(1, rowCount)
+        let sizes = relativeSizes.map { $0.isFinite ? max(0, $0) : 0 }
+        let total = sizes.reduce(0, +)
+        guard !colors.isEmpty, total > 0 else {
+            return [SpectrumLEDRegion(colorRGB: defaultLEDColors[0], rowCount: nil)]
+        }
+        var previousBoundary = 0
+        return colors.enumerated().map { index, color in
+            guard index < colors.count - 1 else {
+                return SpectrumLEDRegion(colorRGB: sanitizedColor(color), rowCount: nil)
+            }
+            let cumulative = sizes.prefix(index + 1).reduce(0, +) / total
+            let minimumBoundary = previousBoundary + 1
+            let rowsNeededAfter = colors.count - index - 1
+            let maximumBoundary = max(minimumBoundary, safeRowCount - rowsNeededAfter)
+            let boundary = min(maximumBoundary, max(minimumBoundary, Int((cumulative * Double(safeRowCount)).rounded())))
+            defer { previousBoundary = boundary }
+            return SpectrumLEDRegion(colorRGB: sanitizedColor(color), rowCount: boundary - previousBoundary)
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case layoutMode, audioSource, fftSize, snapshotHopFrames, refreshIntervalMilliseconds, bandCount, bandGapPixels, peakHoldSeconds, minimumDb, maximumDb, bandFallDbPerSecond, peakFallDbPerSecond, bandSeparation, darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB, darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent, ledSegmentCount, ledGapPercent
+        case layoutMode, audioSource, fftSize, snapshotHopFrames, refreshIntervalMilliseconds, bandCount, bandGapPixels, peakHoldSeconds, minimumDb, maximumDb, bandFallDbPerSecond, peakFallDbPerSecond, bandSeparation, darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB, darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent, ledRegions, ledSegmentCount, ledGapPercent
     }
 
     init() {}
@@ -180,6 +274,15 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
         settings.yellowRegionPercent = try container.decodeIfPresent(Double.self, forKey: .yellowRegionPercent) ?? settings.yellowRegionPercent
         settings.ledSegmentCount = try container.decodeIfPresent(Double.self, forKey: .ledSegmentCount) ?? settings.ledSegmentCount
         settings.ledGapPercent = try container.decodeIfPresent(Double.self, forKey: .ledGapPercent) ?? settings.ledGapPercent
+        if let regions = try container.decodeIfPresent([SpectrumLEDRegion].self, forKey: .ledRegions), !regions.isEmpty {
+            settings.ledRegions = regions
+        } else {
+            settings.ledRegions = Self.migratedLEDRegions(
+                colors: [settings.darkRedRGB, settings.orangeRedRGB, settings.orangeRGB, settings.yellowRGB],
+                relativeSizes: [settings.darkRedRegionPercent, settings.orangeRedRegionPercent, settings.orangeRegionPercent, settings.yellowRegionPercent],
+                rowCount: Int(settings.ledSegmentCount.rounded())
+            )
+        }
         settings.sanitize()
         self = settings
     }
@@ -196,6 +299,7 @@ struct SpectrumLEDProfile: Codable, Identifiable, Equatable {
     var orangeRedRegionPercent: Double
     var orangeRegionPercent: Double
     var yellowRegionPercent: Double
+    var ledRegions: [SpectrumLEDRegion]
     var ledSegmentCount: Double
     var ledGapPercent: Double
 
@@ -209,6 +313,7 @@ struct SpectrumLEDProfile: Codable, Identifiable, Equatable {
         orangeRedRegionPercent = settings.orangeRedRegionPercent
         orangeRegionPercent = settings.orangeRegionPercent
         yellowRegionPercent = settings.yellowRegionPercent
+        ledRegions = settings.ledRegions
         ledSegmentCount = settings.ledSegmentCount
         ledGapPercent = settings.ledGapPercent
     }
@@ -222,8 +327,44 @@ struct SpectrumLEDProfile: Codable, Identifiable, Equatable {
         settings.orangeRedRegionPercent = orangeRedRegionPercent
         settings.orangeRegionPercent = orangeRegionPercent
         settings.yellowRegionPercent = yellowRegionPercent
+        settings.ledRegions = ledRegions
         settings.ledSegmentCount = ledSegmentCount
         settings.ledGapPercent = ledGapPercent
+        settings.sanitize()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB, darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent, ledRegions, ledSegmentCount, ledGapPercent
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        let defaults = SpectrumAnalyzerSettings()
+        darkRedRGB = try container.decodeIfPresent([Double].self, forKey: .darkRedRGB) ?? defaults.darkRedRGB
+        orangeRedRGB = try container.decodeIfPresent([Double].self, forKey: .orangeRedRGB) ?? defaults.orangeRedRGB
+        orangeRGB = try container.decodeIfPresent([Double].self, forKey: .orangeRGB) ?? defaults.orangeRGB
+        yellowRGB = try container.decodeIfPresent([Double].self, forKey: .yellowRGB) ?? defaults.yellowRGB
+        darkRedRegionPercent = try container.decodeIfPresent(Double.self, forKey: .darkRedRegionPercent) ?? defaults.darkRedRegionPercent
+        orangeRedRegionPercent = try container.decodeIfPresent(Double.self, forKey: .orangeRedRegionPercent) ?? defaults.orangeRedRegionPercent
+        orangeRegionPercent = try container.decodeIfPresent(Double.self, forKey: .orangeRegionPercent) ?? defaults.orangeRegionPercent
+        yellowRegionPercent = try container.decodeIfPresent(Double.self, forKey: .yellowRegionPercent) ?? defaults.yellowRegionPercent
+        ledSegmentCount = try container.decodeIfPresent(Double.self, forKey: .ledSegmentCount) ?? defaults.ledSegmentCount
+        ledGapPercent = try container.decodeIfPresent(Double.self, forKey: .ledGapPercent) ?? defaults.ledGapPercent
+        ledRegions = try container.decodeIfPresent([SpectrumLEDRegion].self, forKey: .ledRegions) ?? SpectrumAnalyzerSettings.migratedLEDRegions(
+            colors: [darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB],
+            relativeSizes: [darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent],
+            rowCount: Int(ledSegmentCount.rounded())
+        )
+        var sanitizedSettings = defaults
+        sanitizedSettings.ledSegmentCount = ledSegmentCount
+        sanitizedSettings.ledGapPercent = ledGapPercent
+        sanitizedSettings.ledRegions = ledRegions
+        sanitizedSettings.sanitize()
+        ledSegmentCount = sanitizedSettings.ledSegmentCount
+        ledGapPercent = sanitizedSettings.ledGapPercent
+        ledRegions = sanitizedSettings.ledRegions
     }
 }
 
@@ -299,6 +440,10 @@ final class SpectrumAnalyzerInput: @unchecked Sendable {
         withRoutingPaused {
             currentAnalyzer.reset()
         }
+    }
+
+    func resetPeaks() {
+        currentAnalyzer.resetPeaks()
     }
 
     private func withRoutingPaused(_ body: () -> Void) {
@@ -543,6 +688,24 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
         }
     }
 
+    /// Resets only the visual peak markers. Capture history and the audio graph continue unchanged.
+    func resetPeaks() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.leftPeaks = Array(repeating: self.minimumDb, count: self.bandCount)
+            self.rightPeaks = self.leftPeaks
+            self.leftPeakHoldRemaining = Array(repeating: 0, count: self.bandCount)
+            self.rightPeakHoldRemaining = self.leftPeakHoldRemaining
+            self.lastPeakUpdate = CACurrentMediaTime()
+            self.onSnapshot?(SpectrumSnapshot(
+                left: self.leftDisplayed,
+                right: self.rightDisplayed,
+                leftPeaks: self.leftPeaks,
+                rightPeaks: self.rightPeaks
+            ))
+        }
+    }
+
     private func analyzeLatestSamples() {
         guard isEnabled.load(ordering: .acquiring) else { return }
         let expectedGeneration = generation.load(ordering: .acquiring)
@@ -705,6 +868,7 @@ struct SpectrumAnalyzerView: View {
     @State private var trackInfoDriftWorkItem: DispatchWorkItem?
     @State private var trackInfoOffset = CGSize.zero
     @State private var cursorIsHidden = false
+    @State private var lastTrackIdentity: AppleMusicTrackInfo.Identity?
 
     var body: some View {
         ZStack {
@@ -754,6 +918,9 @@ struct SpectrumAnalyzerView: View {
             } else {
                 revealCursor()
             }
+        }
+        .onChange(of: nowPlaying.state) {
+            resetSpectrumPeaksForNewTrack()
         }
         .onDisappear {
             hideChromeWorkItem?.cancel()
@@ -820,6 +987,16 @@ struct SpectrumAnalyzerView: View {
             trackInfoDriftWorkItem = nil
             trackInfoOffset = .zero
         }
+    }
+
+    private func resetSpectrumPeaksForNewTrack() {
+        guard case let .playing(track) = nowPlaying.state else {
+            lastTrackIdentity = nil
+            return
+        }
+        guard track.identity != lastTrackIdentity else { return }
+        lastTrackIdentity = track.identity
+        appState.resetSpectrumPeaks()
     }
 
     private func ensureTrackInfoDriftScheduled() {

@@ -431,6 +431,10 @@ final class AppState: ObservableObject {
         }
     }
 
+    func resetSpectrumPeaks() {
+        spectrumInput.resetPeaks()
+    }
+
     func setSpectrumFullScreen(_ fullScreen: Bool) {
         isSpectrumFullScreen = fullScreen
     }
