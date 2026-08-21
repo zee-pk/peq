@@ -949,6 +949,12 @@ struct SpectrumAnalyzerView: View {
                 .opacity(chromeOpacity)
                 .allowsHitTesting(false)
         }
+        .contextMenu {
+            Button("Spectrum Options…") {
+                recordActivity()
+                appState.showSpectrumSettings()
+            }
+        }
     }
 
     private func recordActivity() {

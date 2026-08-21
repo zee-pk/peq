@@ -117,6 +117,11 @@ final class StatusBarController: NSObject, NSWindowDelegate {
 
     @objc private func toggleWindow(_ sender: NSStatusBarButton) {
         guard let event = NSApp.currentEvent else { return }
+
+        if event.type == .leftMouseUp, event.clickCount >= 2 {
+            showSpectrumWindow()
+            return
+        }
         
         if event.type == .rightMouseUp {
             let menu = NSMenu()
