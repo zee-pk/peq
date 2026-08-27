@@ -56,6 +56,11 @@ struct SpectrumSettingsView: View {
                 DecimalSetting("Band separation", value: $draft.bandSeparation, range: SpectrumAnalyzerTuning.bandSeparationRange, step: 0.05, suffix: "amount")
             }
 
+            Section("Display") {
+                ColorSetting("Peak marker color", rgb: peakMarkerColorBinding)
+                Toggle("Hide labels and guides when idle", isOn: $draft.hidePlotLabelsWhenIdle)
+            }
+
             Section("LED appearance") {
                 HStack {
                     Menu("Load profile") {
@@ -136,6 +141,13 @@ struct SpectrumSettingsView: View {
         Binding(get: { draft.ledSegmentCount }, set: { draft.setLEDRowCount($0) })
     }
 
+    private var peakMarkerColorBinding: Binding<Color> {
+        Binding(
+            get: { color(from: draft.peakMarkerRGB) },
+            set: { draft.peakMarkerRGB = rgb(from: $0) }
+        )
+    }
+
     private func rowCountBinding(for id: UUID) -> Binding<Int> {
         Binding(
             get: { draft.ledRegions.first(where: { $0.id == id })?.rowCount ?? 1 },
@@ -145,16 +157,21 @@ struct SpectrumSettingsView: View {
 
     private func colorBinding(for id: UUID) -> Binding<Color> {
         Binding(
-            get: {
-                let rgb = draft.ledRegions.first(where: { $0.id == id })?.colorRGB ?? [0, 0, 0]
-                return Color(red: rgb.indices.contains(0) ? rgb[0] : 0, green: rgb.indices.contains(1) ? rgb[1] : 0, blue: rgb.indices.contains(2) ? rgb[2] : 0)
-            },
+            get: { color(from: draft.ledRegions.first(where: { $0.id == id })?.colorRGB ?? [0, 0, 0]) },
             set: { color in
-                guard let nsColor = NSColor(color).usingColorSpace(.deviceRGB) else { return }
                 guard let index = draft.ledRegions.firstIndex(where: { $0.id == id }) else { return }
-                draft.ledRegions[index].colorRGB = [Double(nsColor.redComponent), Double(nsColor.greenComponent), Double(nsColor.blueComponent)]
+                draft.ledRegions[index].colorRGB = rgb(from: color)
             }
         )
+    }
+
+    private func color(from rgb: [Double]) -> Color {
+        Color(red: rgb.indices.contains(0) ? rgb[0] : 0, green: rgb.indices.contains(1) ? rgb[1] : 0, blue: rgb.indices.contains(2) ? rgb[2] : 0)
+    }
+
+    private func rgb(from color: Color) -> [Double] {
+        guard let nsColor = NSColor(color).usingColorSpace(.deviceRGB) else { return [0, 0, 0] }
+        return [Double(nsColor.redComponent), Double(nsColor.greenComponent), Double(nsColor.blueComponent)]
     }
 }
 

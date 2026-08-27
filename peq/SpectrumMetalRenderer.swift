@@ -8,7 +8,7 @@ enum SpectrumMetalStyle {
 
 enum SpectrumPlotLayout {
     static let plotLeft: CGFloat = 50
-    static let plotRight: CGFloat = 18
+    static let plotRight: CGFloat = 50
     static let plotTop: CGFloat = 12
     static let plotBottom: CGFloat = 28
 
@@ -327,14 +327,13 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
     private func appendGrid(in plot: CGRect, settings: SpectrumAnalyzerSettings, opacity: Float, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
         guard opacity > 0 else { return }
         let horizontal = SIMD4<Float>(1, 1, 1, 0.08 * opacity)
-        let vertical = SIMD4<Float>(1, 1, 1, 0.05 * opacity)
+        let axis = SIMD4<Float>(1, 1, 1, 0.05 * opacity)
+        appendRectangle(CGRect(x: plot.minX, y: plot.minY, width: 1, height: plot.height), topColor: axis, bottomColor: axis, canvasSize: canvasSize, to: &vertices)
+        appendRectangle(CGRect(x: plot.maxX - 1, y: plot.minY, width: 1, height: plot.height), topColor: axis, bottomColor: axis, canvasSize: canvasSize, to: &vertices)
         for db in SpectrumAnalyzerTuning.dbTicks(minimum: Float(settings.minimumDb), maximum: Float(settings.maximumDb)) {
+            guard db < Float(settings.maximumDb) else { continue }
             let y = yPosition(db, settings: settings, in: plot)
             appendRectangle(CGRect(x: plot.minX, y: y, width: plot.width, height: 1), topColor: horizontal, bottomColor: horizontal, canvasSize: canvasSize, to: &vertices)
-        }
-        for frequency in Self.frequencyTicks {
-            let x = xPosition(frequency, in: plot)
-            appendRectangle(CGRect(x: x, y: plot.minY, width: 1, height: plot.height), topColor: vertical, bottomColor: vertical, canvasSize: canvasSize, to: &vertices)
         }
     }
 
@@ -343,7 +342,7 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         guard count > 0 else { return }
         let cellWidth = plot.width / CGFloat(count)
         let gap = min(max(0, CGFloat(settings.bandGapPixels)), max(0, cellWidth - 1))
-        let peakColor = SIMD4<Float>(0.78, 0.78, 0.78, 0.82)
+        let peakColor = Self.peakMarkerColor(settings.peakMarkerRGB)
         let totalRows = max(1, Int(settings.ledSegmentCount.rounded()))
         for index in 0..<count {
             let value = max(snapshot.left[index], snapshot.right[index])
@@ -385,6 +384,15 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
             Float(values.indices.contains(1) ? values[1] : 0),
             Float(values.indices.contains(2) ? values[2] : 0),
             0.92
+        )
+    }
+
+    private static func peakMarkerColor(_ values: [Double]) -> SIMD4<Float> {
+        SIMD4(
+            Float(values.indices.contains(0) ? values[0] : 0.78),
+            Float(values.indices.contains(1) ? values[1] : 0.78),
+            Float(values.indices.contains(2) ? values[2] : 0.78),
+            0.82
         )
     }
 

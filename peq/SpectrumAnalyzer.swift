@@ -99,6 +99,8 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
     var bandFallDbPerSecond = SpectrumAnalyzerTuning.defaultBandFallDbPerSecond
     var peakFallDbPerSecond = SpectrumAnalyzerTuning.defaultPeakFallDbPerSecond
     var bandSeparation = SpectrumAnalyzerTuning.defaultBandSeparation
+    var peakMarkerRGB = [0.78, 0.78, 0.78]
+    var hidePlotLabelsWhenIdle = true
     var darkRedRGB = [0.72, 0.015, 0.025]
     var orangeRedRGB = [1.0, 0.12, 0.035]
     var orangeRGB = [1.0, 0.42, 0.04]
@@ -145,6 +147,7 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
         bandFallDbPerSecond = min(max(bandFallDbPerSecond, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
         peakFallDbPerSecond = min(max(peakFallDbPerSecond, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
         bandSeparation = min(max(bandSeparation, SpectrumAnalyzerTuning.bandSeparationRange.lowerBound), SpectrumAnalyzerTuning.bandSeparationRange.upperBound)
+        peakMarkerRGB = Self.sanitizedColor(peakMarkerRGB)
         darkRedRGB = Self.sanitizedColor(darkRedRGB)
         orangeRedRGB = Self.sanitizedColor(orangeRedRGB)
         orangeRGB = Self.sanitizedColor(orangeRGB)
@@ -243,7 +246,7 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case layoutMode, audioSource, fftSize, snapshotHopFrames, refreshIntervalMilliseconds, bandCount, bandGapPixels, peakHoldSeconds, minimumDb, maximumDb, bandFallDbPerSecond, peakFallDbPerSecond, bandSeparation, darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB, darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent, ledRegions, ledSegmentCount, ledGapPercent
+        case layoutMode, audioSource, fftSize, snapshotHopFrames, refreshIntervalMilliseconds, bandCount, bandGapPixels, peakHoldSeconds, minimumDb, maximumDb, bandFallDbPerSecond, peakFallDbPerSecond, bandSeparation, peakMarkerRGB, hidePlotLabelsWhenIdle, darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB, darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent, ledRegions, ledSegmentCount, ledGapPercent
     }
 
     init() {}
@@ -264,6 +267,8 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
         settings.bandFallDbPerSecond = try container.decodeIfPresent(Double.self, forKey: .bandFallDbPerSecond) ?? settings.bandFallDbPerSecond
         settings.peakFallDbPerSecond = try container.decodeIfPresent(Double.self, forKey: .peakFallDbPerSecond) ?? settings.peakFallDbPerSecond
         settings.bandSeparation = try container.decodeIfPresent(Double.self, forKey: .bandSeparation) ?? settings.bandSeparation
+        settings.peakMarkerRGB = try container.decodeIfPresent([Double].self, forKey: .peakMarkerRGB) ?? settings.peakMarkerRGB
+        settings.hidePlotLabelsWhenIdle = try container.decodeIfPresent(Bool.self, forKey: .hidePlotLabelsWhenIdle) ?? settings.hidePlotLabelsWhenIdle
         settings.darkRedRGB = try container.decodeIfPresent([Double].self, forKey: .darkRedRGB) ?? settings.darkRedRGB
         settings.orangeRedRGB = try container.decodeIfPresent([Double].self, forKey: .orangeRedRGB) ?? settings.orangeRedRGB
         settings.orangeRGB = try container.decodeIfPresent([Double].self, forKey: .orangeRGB) ?? settings.orangeRGB
@@ -879,10 +884,13 @@ struct SpectrumAnalyzerView: View {
                         .frame(width: geometry.size.width, height: geometry.size.height)
                 } else {
                     VStack(spacing: 0) {
-                        AppleMusicTrackInfoView(state: nowPlaying.state)
-                        .offset(trackInfoOffset)
-                        .frame(width: geometry.size.width, height: geometry.size.height * 0.4)
-                        .clipped()
+                        Color.clear
+                            .overlay {
+                                AppleMusicTrackInfoView(state: nowPlaying.state)
+                                    .offset(trackInfoOffset)
+                            }
+                            .frame(width: geometry.size.width, height: geometry.size.height * 0.4)
+                            .clipped()
 
                         spectrumContent
                             .frame(width: geometry.size.width, height: geometry.size.height * 0.6)
@@ -937,7 +945,7 @@ struct SpectrumAnalyzerView: View {
             SpectrumMetalView(
                 snapshot: appState.spectrum,
                 settings: appState.spectrumSettings,
-                chromeOpacity: Float(chromeOpacity)
+                chromeOpacity: Float(appState.spectrumSettings.hidePlotLabelsWhenIdle ? chromeOpacity : 1)
             ) { fps in
                 appState.reportSpectrumRenderFPS(fps)
             }
@@ -946,7 +954,7 @@ struct SpectrumAnalyzerView: View {
                 maximumDb: Float(appState.spectrumSettings.maximumDb),
                 bandCount: appState.spectrumSettings.bandCount
             )
-                .opacity(chromeOpacity)
+                .opacity(appState.spectrumSettings.hidePlotLabelsWhenIdle ? chromeOpacity : 1)
                 .allowsHitTesting(false)
         }
         .contextMenu {
@@ -973,7 +981,7 @@ struct SpectrumAnalyzerView: View {
             cursorIsHidden = true
         }
         hideChromeWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: workItem)
     }
 
     private func revealCursor() {
@@ -1114,7 +1122,12 @@ private struct SpectrumPlotLabels: View {
                     Text("\(Int(tick))")
                         .font(.system(size: 9, weight: .light, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.32))
-                        .position(x: 34, y: yPosition(tick, in: plot))
+                        .position(x: plot.minX - 16, y: yPosition(tick, in: plot))
+
+                    Text("\(Int(tick))")
+                        .font(.system(size: 9, weight: .light, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.32))
+                        .position(x: plot.maxX + 16, y: yPosition(tick, in: plot))
                 }
 
                 ForEach(Array(stride(from: 0, to: bandCount, by: 2)), id: \.self) { band in
