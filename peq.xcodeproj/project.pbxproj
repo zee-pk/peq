@@ -260,6 +260,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = peq/peq.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = FP66R2N3A9;
@@ -271,6 +272,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAudioCaptureUsageDescription = "peq captures system audio so it can apply your selected equalizer before playback.";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "peq reads the current Apple Music track to show song details alongside the spectrum analyzer.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -295,6 +297,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = peq/peq.entitlements;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = FP66R2N3A9;
@@ -306,6 +309,7 @@
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
 				INFOPLIST_KEY_LSUIElement = YES;
 				INFOPLIST_KEY_NSAudioCaptureUsageDescription = "peq captures system audio so it can apply your selected equalizer before playback.";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "peq reads the current Apple Music track to show song details alongside the spectrum analyzer.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

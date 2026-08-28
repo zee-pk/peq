@@ -7,30 +7,31 @@ enum SpectrumMetalStyle {
 }
 
 enum SpectrumPlotLayout {
-    static let channelGap: CGFloat = 16
-    static let plotLeft: CGFloat = 70
-    static let plotRight: CGFloat = 52
-    static let plotTop: CGFloat = 24
-    static let plotBottom: CGFloat = 26
+    static let plotLeft: CGFloat = 50
+    static let plotRight: CGFloat = 50
+    static let plotTop: CGFloat = 12
+    static let plotBottom: CGFloat = 28
 
-    static func plotRects(in size: CGSize) -> [CGRect] {
-        let channelHeight = max(0, (size.height - channelGap) / 2)
-        return (0..<2).map { channel in
-            let originY = CGFloat(channel) * (channelHeight + channelGap)
-            return CGRect(
-                x: plotLeft,
-                y: originY + plotTop,
-                width: max(1, size.width - plotLeft - plotRight),
-                height: max(1, channelHeight - plotTop - plotBottom)
-            )
-        }
+    static func plotRect(in size: CGSize) -> CGRect {
+        CGRect(
+            x: plotLeft,
+            y: plotTop,
+            width: max(1, size.width - plotLeft - plotRight),
+            height: max(1, size.height - plotTop - plotBottom)
+        )
     }
 }
 
-struct SpectrumMetalView: NSViewRepresentable {
+struct SpectrumMetalView: NSViewRepresentable, Animatable {
     let snapshot: SpectrumSnapshot
     let settings: SpectrumAnalyzerSettings
+    var chromeOpacity: Float
     let onRenderFPS: (Double) -> Void
+
+    var animatableData: Float {
+        get { chromeOpacity }
+        set { chromeOpacity = newValue }
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -56,7 +57,7 @@ struct SpectrumMetalView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: MTKView, context: Context) {
-        context.coordinator.renderer?.submit(snapshot, settings: settings)
+        context.coordinator.renderer?.submit(snapshot, settings: settings, chromeOpacity: chromeOpacity)
         context.coordinator.renderer?.onMeasuredFPS = onRenderFPS
         context.coordinator.renderer?.updatePreferredFrameRate()
     }
@@ -104,46 +105,15 @@ private struct SpectrumVertex {
 }
 
 private struct SpectrumStyleUniforms {
-    let darkRed: SIMD4<Float>
-    let orangeRed: SIMD4<Float>
-    let orange: SIMD4<Float>
-    let yellow: SIMD4<Float>
-    let thresholds: SIMD4<Float>
     let segments: SIMD4<Float>
 
     init(settings: SpectrumAnalyzerSettings) {
-        let darkRedSize = Self.sanitizedRegionSize(Float(settings.darkRedRegionPercent))
-        let orangeRedSize = Self.sanitizedRegionSize(Float(settings.orangeRedRegionPercent))
-        let orangeSize = Self.sanitizedRegionSize(Float(settings.orangeRegionPercent))
-        let yellowSize = Self.sanitizedRegionSize(Float(settings.yellowRegionPercent))
-        let requestedTotal = darkRedSize + orangeRedSize + orangeSize + yellowSize
-
-        let regionSizes: SIMD4<Float>
-        if requestedTotal.isFinite, requestedTotal > 0 {
-            regionSizes = SIMD4(darkRedSize, orangeRedSize, orangeSize, yellowSize) / requestedTotal
-        } else {
-            regionSizes = SIMD4(0.38, 0.22, 0.20, 0.20)
-        }
-
         let requestedGap = Float(settings.ledGapPercent)
         let gapPercent = requestedGap.isFinite ? min(100, max(0, requestedGap)) : 18
         let requestedSegmentCount = Float(settings.ledSegmentCount)
         let segmentCount = requestedSegmentCount.isFinite ? max(1, requestedSegmentCount) : 48
 
-        darkRed = SIMD4(Self.color(settings.darkRedRGB), 1)
-        orangeRed = SIMD4(Self.color(settings.orangeRedRGB), 1)
-        orange = SIMD4(Self.color(settings.orangeRGB), 1)
-        yellow = SIMD4(Self.color(settings.yellowRGB), 1)
-        thresholds = SIMD4(regionSizes.x, regionSizes.x + regionSizes.y, regionSizes.x + regionSizes.y + regionSizes.z, 0)
         segments = SIMD4(segmentCount, gapPercent / 100, 0, 0)
-    }
-
-    private static func sanitizedRegionSize(_ value: Float) -> Float {
-        value.isFinite ? max(0, value) : 0
-    }
-
-    private static func color(_ values: [Double]) -> SIMD3<Float> {
-        SIMD3(Float(values.indices.contains(0) ? values[0] : 0), Float(values.indices.contains(1) ? values[1] : 0), Float(values.indices.contains(2) ? values[2] : 0))
     }
 }
 
@@ -167,11 +137,6 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
     };
 
     struct SpectrumStyle {
-        float4 darkRed;
-        float4 orangeRed;
-        float4 orange;
-        float4 yellow;
-        float4 thresholds;
         float4 segments;
     };
 
@@ -186,23 +151,14 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
 
     fragment float4 spectrumFragment(SpectrumRasterData in [[stage_in]], constant SpectrumStyle &style [[buffer(1)]]) {
         if (in.isMeter > 0.5) {
-            if (fract(in.meterCoordinate.y * style.segments.x) < style.segments.y) {
+            float level = clamp(in.meterCoordinate.y, 0.0, 1.0);
+            float cellPosition = fract(level * style.segments.x);
+            if (level > 0.000001 && cellPosition >= (1.0 - style.segments.y)) {
                 return float4(0.0, 0.0, 0.0, 1.0);
             }
 
-            float level = clamp(in.meterCoordinate.y, 0.0, 1.0);
-            float3 meterColor;
-            if (level < style.thresholds.x) {
-                meterColor = style.darkRed.rgb;
-            } else if (level < style.thresholds.y) {
-                meterColor = style.orangeRed.rgb;
-            } else if (level < style.thresholds.z) {
-                meterColor = style.orange.rgb;
-            } else {
-                meterColor = style.yellow.rgb;
-            }
-            float centerGlow = 0.90 + (0.10 * (1.0 - abs((in.meterCoordinate.x * 2.0) - 1.0)));
-            return float4(meterColor * centerGlow, 0.98);
+            float centerGlow = 0.72 + (0.08 * (1.0 - abs((in.meterCoordinate.x * 2.0) - 1.0)));
+            return float4(in.color.rgb * centerGlow, in.color.a);
         }
         return in.color;
     }
@@ -221,6 +177,7 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
     private let snapshotLock = NSLock()
     private var latestSnapshot = SpectrumSnapshot.empty
     private var latestSettings = SpectrumAnalyzerSettings()
+    private var latestChromeOpacity: Float = 1
     private let measurementLock = NSLock()
     private var measuredFrameCount = 0
     private var measuredFrameStart = CACurrentMediaTime()
@@ -252,7 +209,7 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
 
         let pipelineState = try device.makeRenderPipelineState(descriptor: descriptor)
         let supportedBandCount = SpectrumMetalStyle.minimumBandCapacity
-        let vertexCapacity = (supportedBandCount * 24) + 256
+        let vertexCapacity = (supportedBandCount * ((SpectrumAnalyzerSettings.ledRegionCountRange.upperBound * 6) + 6)) + 256
         let bufferLength = vertexCapacity * MemoryLayout<SpectrumVertex>.stride
         let buffers = (0..<3).compactMap { _ in device.makeBuffer(length: bufferLength, options: .storageModeShared) }
         guard buffers.count == 3 else { throw SpectrumMetalRendererError.vertexBufferCreationFailed }
@@ -274,10 +231,11 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         view.delegate = self
     }
 
-    func submit(_ snapshot: SpectrumSnapshot, settings: SpectrumAnalyzerSettings) {
+    func submit(_ snapshot: SpectrumSnapshot, settings: SpectrumAnalyzerSettings, chromeOpacity: Float) {
         snapshotLock.lock()
         latestSnapshot = snapshot
         latestSettings = settings
+        latestChromeOpacity = min(1, max(0, chromeOpacity))
         snapshotLock.unlock()
     }
 
@@ -300,10 +258,11 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         snapshotLock.lock()
         let snapshot = latestSnapshot
         let settings = latestSettings
+        let chromeOpacity = latestChromeOpacity
         snapshotLock.unlock()
 
         vertices.removeAll(keepingCapacity: true)
-        appendScene(snapshot: snapshot, settings: settings, size: view.bounds.size, to: &vertices)
+        appendScene(snapshot: snapshot, settings: settings, chromeOpacity: chromeOpacity, size: view.bounds.size, to: &vertices)
         guard vertices.count <= vertexCapacity else {
             NSLog("Spectrum Metal vertex capacity exceeded: generated %d vertices, capacity is %d.", vertices.count, vertexCapacity)
             encoder.endEncoding()
@@ -358,61 +317,83 @@ private final class SpectrumMetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    private func appendScene(snapshot: SpectrumSnapshot, settings: SpectrumAnalyzerSettings, size: CGSize, to vertices: inout [SpectrumVertex]) {
+    private func appendScene(snapshot: SpectrumSnapshot, settings: SpectrumAnalyzerSettings, chromeOpacity: Float, size: CGSize, to vertices: inout [SpectrumVertex]) {
         guard size.width > 0, size.height > 0 else { return }
-        let plots = SpectrumPlotLayout.plotRects(in: size)
-        let channels = [(snapshot.left, snapshot.leftPeaks), (snapshot.right, snapshot.rightPeaks)]
-
-        for (plot, channel) in zip(plots, channels) {
-            appendGrid(in: plot, settings: settings, canvasSize: size, to: &vertices)
-            appendBars(values: channel.0, peaks: channel.1, settings: settings, in: plot, canvasSize: size, to: &vertices)
-            appendBorder(around: plot, canvasSize: size, to: &vertices)
-        }
+        let plot = SpectrumPlotLayout.plotRect(in: size)
+        appendGrid(in: plot, settings: settings, opacity: chromeOpacity, canvasSize: size, to: &vertices)
+        appendMergedBars(snapshot: snapshot, settings: settings, in: plot, canvasSize: size, to: &vertices)
     }
 
-    private func appendGrid(in plot: CGRect, settings: SpectrumAnalyzerSettings, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
-        let horizontal = SIMD4<Float>(1, 1, 1, 0.16)
-        let vertical = SIMD4<Float>(1, 1, 1, 0.10)
+    private func appendGrid(in plot: CGRect, settings: SpectrumAnalyzerSettings, opacity: Float, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
+        guard opacity > 0 else { return }
+        let horizontal = SIMD4<Float>(1, 1, 1, 0.08 * opacity)
+        let axis = SIMD4<Float>(1, 1, 1, 0.05 * opacity)
+        appendRectangle(CGRect(x: plot.minX, y: plot.minY, width: 1, height: plot.height), topColor: axis, bottomColor: axis, canvasSize: canvasSize, to: &vertices)
+        appendRectangle(CGRect(x: plot.maxX - 1, y: plot.minY, width: 1, height: plot.height), topColor: axis, bottomColor: axis, canvasSize: canvasSize, to: &vertices)
         for db in SpectrumAnalyzerTuning.dbTicks(minimum: Float(settings.minimumDb), maximum: Float(settings.maximumDb)) {
+            guard db < Float(settings.maximumDb) else { continue }
             let y = yPosition(db, settings: settings, in: plot)
             appendRectangle(CGRect(x: plot.minX, y: y, width: plot.width, height: 1), topColor: horizontal, bottomColor: horizontal, canvasSize: canvasSize, to: &vertices)
         }
-        for frequency in Self.frequencyTicks {
-            let x = xPosition(frequency, in: plot)
-            appendRectangle(CGRect(x: x, y: plot.minY, width: 1, height: plot.height), topColor: vertical, bottomColor: vertical, canvasSize: canvasSize, to: &vertices)
-        }
     }
 
-    private func appendBars(values: [Float], peaks: [Float], settings: SpectrumAnalyzerSettings, in plot: CGRect, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
-        let count = min(values.count, peaks.count)
+    private func appendMergedBars(snapshot: SpectrumSnapshot, settings: SpectrumAnalyzerSettings, in plot: CGRect, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
+        let count = min(snapshot.left.count, snapshot.right.count, snapshot.leftPeaks.count, snapshot.rightPeaks.count)
         guard count > 0 else { return }
         let cellWidth = plot.width / CGFloat(count)
         let gap = min(max(0, CGFloat(settings.bandGapPixels)), max(0, cellWidth - 1))
-        let peakColor = SIMD4<Float>(1, 1, 1, 0.96)
+        let peakColor = Self.peakMarkerColor(settings.peakMarkerRGB)
+        let totalRows = max(1, Int(settings.ledSegmentCount.rounded()))
         for index in 0..<count {
+            let value = max(snapshot.left[index], snapshot.right[index])
+            let peak = max(snapshot.leftPeaks[index], snapshot.rightPeaks[index])
             let x = plot.minX + CGFloat(index) * cellWidth + (gap / 2)
             let width = max(1, cellWidth - gap)
-            let y = yPosition(values[index], settings: settings, in: plot)
-            appendRectangle(
-                CGRect(x: x, y: y, width: width, height: plot.maxY - y),
-                topColor: .zero,
-                bottomColor: .zero,
-                meterTopLevel: normalizedLevel(values[index], settings: settings),
-                meterBottomLevel: 0,
-                canvasSize: canvasSize,
-                to: &vertices
-            )
-            let peakY = yPosition(peaks[index], settings: settings, in: plot)
+            let valueLevel = normalizedLevel(value, settings: settings)
+            var lowerRow = 0
+            for region in settings.ledRegions {
+                let upperRow = min(totalRows, lowerRow + (region.rowCount ?? (totalRows - lowerRow)))
+                let lowerLevel = Float(lowerRow) / Float(totalRows)
+                let upperLevel = Float(upperRow) / Float(totalRows)
+                let visibleUpperLevel = min(valueLevel, upperLevel)
+                if visibleUpperLevel > lowerLevel {
+                    let topY = plot.maxY - (CGFloat(visibleUpperLevel) * plot.height)
+                    let bottomY = plot.maxY - (CGFloat(lowerLevel) * plot.height)
+                    let color = Self.meterColor(region.colorRGB)
+                    appendRectangle(
+                        CGRect(x: x, y: topY, width: width, height: bottomY - topY),
+                        topColor: color,
+                        bottomColor: color,
+                        meterTopLevel: visibleUpperLevel,
+                        meterBottomLevel: lowerLevel,
+                        canvasSize: canvasSize,
+                        to: &vertices
+                    )
+                }
+                lowerRow = upperRow
+                if lowerRow >= totalRows || upperLevel >= valueLevel { break }
+            }
+            let peakY = min(max(plot.minY, yPosition(peak, settings: settings, in: plot)), plot.maxY - 2)
             appendRectangle(CGRect(x: x, y: peakY, width: width, height: 2), topColor: peakColor, bottomColor: peakColor, canvasSize: canvasSize, to: &vertices)
         }
     }
 
-    private func appendBorder(around plot: CGRect, canvasSize: CGSize, to vertices: inout [SpectrumVertex]) {
-        let color = SIMD4<Float>(1, 1, 1, 0.32)
-        appendRectangle(CGRect(x: plot.minX, y: plot.minY, width: plot.width, height: 1), topColor: color, bottomColor: color, canvasSize: canvasSize, to: &vertices)
-        appendRectangle(CGRect(x: plot.minX, y: plot.maxY - 1, width: plot.width, height: 1), topColor: color, bottomColor: color, canvasSize: canvasSize, to: &vertices)
-        appendRectangle(CGRect(x: plot.minX, y: plot.minY, width: 1, height: plot.height), topColor: color, bottomColor: color, canvasSize: canvasSize, to: &vertices)
-        appendRectangle(CGRect(x: plot.maxX - 1, y: plot.minY, width: 1, height: plot.height), topColor: color, bottomColor: color, canvasSize: canvasSize, to: &vertices)
+    private static func meterColor(_ values: [Double]) -> SIMD4<Float> {
+        SIMD4(
+            Float(values.indices.contains(0) ? values[0] : 0),
+            Float(values.indices.contains(1) ? values[1] : 0),
+            Float(values.indices.contains(2) ? values[2] : 0),
+            0.92
+        )
+    }
+
+    private static func peakMarkerColor(_ values: [Double]) -> SIMD4<Float> {
+        SIMD4(
+            Float(values.indices.contains(0) ? values[0] : 0.78),
+            Float(values.indices.contains(1) ? values[1] : 0.78),
+            Float(values.indices.contains(2) ? values[2] : 0.78),
+            0.82
+        )
     }
 
     private func appendRectangle(

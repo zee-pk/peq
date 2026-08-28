@@ -1,4 +1,5 @@
 import Accelerate
+import AppKit
 import AVFoundation
 import Atomics
 import Darwin
@@ -41,8 +42,52 @@ enum SpectrumAnalyzerTuning {
     }
 }
 
+enum SpectrumLayoutMode: String, Codable, CaseIterable, Identifiable {
+    case fullSpectrum
+    case trackInfoAndSpectrum
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .fullSpectrum: "Full Spectrum"
+        case .trackInfoAndSpectrum: "Track Info + Spectrum"
+        }
+    }
+}
+
+enum SpectrumAudioSource: String, Codable, CaseIterable, Identifiable {
+    case preEQ
+    case postEQ
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .preEQ: "Pre-EQ"
+        case .postEQ: "Post-EQ"
+        }
+    }
+
+    fileprivate var atomicValue: Int {
+        switch self {
+        case .preEQ: 0
+        case .postEQ: 1
+        }
+    }
+}
+
 /// Stored independently from EQ presets because it controls the analyzer rather than audio processing.
+struct SpectrumLEDRegion: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var colorRGB: [Double]
+    /// Number of LED rows in this region. The final region always uses the remaining rows.
+    var rowCount: Int?
+}
+
 struct SpectrumAnalyzerSettings: Codable, Equatable {
+    var layoutMode = SpectrumLayoutMode.fullSpectrum
+    var audioSource = SpectrumAudioSource.postEQ
     var fftSize = SpectrumAnalyzerTuning.defaultFFTSize
     var snapshotHopFrames = SpectrumAnalyzerTuning.defaultSnapshotHopFrames
     var refreshIntervalMilliseconds = SpectrumAnalyzerTuning.defaultRefreshIntervalMilliseconds
@@ -54,6 +99,8 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
     var bandFallDbPerSecond = SpectrumAnalyzerTuning.defaultBandFallDbPerSecond
     var peakFallDbPerSecond = SpectrumAnalyzerTuning.defaultPeakFallDbPerSecond
     var bandSeparation = SpectrumAnalyzerTuning.defaultBandSeparation
+    var peakMarkerRGB = [0.78, 0.78, 0.78]
+    var hidePlotLabelsWhenIdle = true
     var darkRedRGB = [0.72, 0.015, 0.025]
     var orangeRedRGB = [1.0, 0.12, 0.035]
     var orangeRGB = [1.0, 0.42, 0.04]
@@ -62,6 +109,12 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
     var orangeRedRegionPercent = 20.0
     var orangeRegionPercent = 20.0
     var yellowRegionPercent = 25.0
+    var ledRegions = [
+        SpectrumLEDRegion(colorRGB: [0.72, 0.015, 0.025], rowCount: 8),
+        SpectrumLEDRegion(colorRGB: [1.0, 0.12, 0.035], rowCount: 10),
+        SpectrumLEDRegion(colorRGB: [1.0, 0.42, 0.04], rowCount: 10),
+        SpectrumLEDRegion(colorRGB: [1.0, 0.86, 0.12], rowCount: nil)
+    ]
     var ledSegmentCount = 40.0
     var ledGapPercent = 20.0
 
@@ -75,6 +128,7 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
     static let maximumDbRange = -60.0...24.0
     static let minimumDbSpan = 12.0
     static let ledSegmentRange = 4.0...160.0
+    static let ledRegionCountRange = 1...10
     static let percentageRange = 0.0...100.0
 
     mutating func sanitize() {
@@ -93,6 +147,7 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
         bandFallDbPerSecond = min(max(bandFallDbPerSecond, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
         peakFallDbPerSecond = min(max(peakFallDbPerSecond, SpectrumAnalyzerTuning.fallRateRange.lowerBound), SpectrumAnalyzerTuning.fallRateRange.upperBound)
         bandSeparation = min(max(bandSeparation, SpectrumAnalyzerTuning.bandSeparationRange.lowerBound), SpectrumAnalyzerTuning.bandSeparationRange.upperBound)
+        peakMarkerRGB = Self.sanitizedColor(peakMarkerRGB)
         darkRedRGB = Self.sanitizedColor(darkRedRGB)
         orangeRedRGB = Self.sanitizedColor(orangeRedRGB)
         orangeRGB = Self.sanitizedColor(orangeRGB)
@@ -101,17 +156,97 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
         orangeRedRegionPercent = Self.clampPercent(orangeRedRegionPercent)
         orangeRegionPercent = Self.clampPercent(orangeRegionPercent)
         yellowRegionPercent = Self.clampPercent(yellowRegionPercent)
-        ledSegmentCount = min(max(ledSegmentCount, Self.ledSegmentRange.lowerBound), Self.ledSegmentRange.upperBound)
+        ledSegmentCount = min(max(ledSegmentCount.rounded(), Self.ledSegmentRange.lowerBound), Self.ledSegmentRange.upperBound)
         ledGapPercent = Self.clampPercent(ledGapPercent)
+        sanitizeLEDRegions()
     }
 
-    private static func sanitizedColor(_ color: [Double]) -> [Double] {
+    private mutating func sanitizeLEDRegions() {
+        let totalRows = Int(ledSegmentCount)
+        let maximumRegionCount = min(Self.ledRegionCountRange.upperBound, totalRows)
+        if ledRegions.isEmpty {
+            ledRegions = [SpectrumLEDRegion(colorRGB: Self.defaultLEDColors[0], rowCount: nil)]
+        }
+        ledRegions = Array(ledRegions.prefix(maximumRegionCount))
+        for index in ledRegions.indices {
+            ledRegions[index].colorRGB = Self.sanitizedColor(ledRegions[index].colorRGB)
+        }
+
+        var remainingRows = totalRows
+        for index in ledRegions.indices.dropLast() {
+            let laterRegionCount = ledRegions.count - index - 1
+            let maximumRows = max(1, remainingRows - laterRegionCount)
+            let requestedRows = ledRegions[index].rowCount ?? max(1, remainingRows / (laterRegionCount + 1))
+            let rows = min(max(1, requestedRows), maximumRows)
+            ledRegions[index].rowCount = rows
+            remainingRows -= rows
+        }
+        ledRegions[ledRegions.index(before: ledRegions.endIndex)].rowCount = nil
+    }
+
+    mutating func setLEDRegionCount(_ requestedCount: Int) {
+        sanitize()
+        let totalRows = Int(ledSegmentCount)
+        let targetCount = min(max(requestedCount, Self.ledRegionCountRange.lowerBound), min(Self.ledRegionCountRange.upperBound, totalRows))
+        if targetCount < ledRegions.count {
+            ledRegions.removeLast(ledRegions.count - targetCount)
+        } else {
+            while ledRegions.count < targetCount {
+                let finalIndex = ledRegions.index(before: ledRegions.endIndex)
+                let allocatedRows = ledRegions.dropLast().compactMap(\.rowCount).reduce(0, +)
+                let remainingRows = max(1, totalRows - allocatedRows)
+                ledRegions[finalIndex].rowCount = max(1, remainingRows / 2)
+                let color = ledRegions[finalIndex].colorRGB
+                ledRegions.append(SpectrumLEDRegion(colorRGB: color, rowCount: nil))
+            }
+        }
+        sanitizeLEDRegions()
+    }
+
+    mutating func setLEDRegionRowCount(_ rowCount: Int, id: UUID) {
+        guard let index = ledRegions.firstIndex(where: { $0.id == id }), index < ledRegions.count - 1 else { return }
+        ledRegions[index].rowCount = rowCount
+        sanitizeLEDRegions()
+    }
+
+    mutating func setLEDRowCount(_ rowCount: Double) {
+        ledSegmentCount = rowCount
+        sanitize()
+    }
+
+    static func sanitizedColor(_ color: [Double]) -> [Double] {
         (0..<3).map { index in min(1, max(0, color.indices.contains(index) ? color[index] : 0)) }
     }
     private static func clampPercent(_ value: Double) -> Double { min(100, max(0, value)) }
 
+    private static let defaultLEDColors = [
+        [0.72, 0.015, 0.025], [1.0, 0.12, 0.035], [1.0, 0.42, 0.04], [1.0, 0.86, 0.12]
+    ]
+
+    static func migratedLEDRegions(colors: [[Double]], relativeSizes: [Double], rowCount: Int) -> [SpectrumLEDRegion] {
+        let safeRowCount = max(1, rowCount)
+        let sizes = relativeSizes.map { $0.isFinite ? max(0, $0) : 0 }
+        let total = sizes.reduce(0, +)
+        guard !colors.isEmpty, total > 0 else {
+            return [SpectrumLEDRegion(colorRGB: defaultLEDColors[0], rowCount: nil)]
+        }
+        var previousBoundary = 0
+        return colors.enumerated().map { index, color in
+            guard index < colors.count - 1 else {
+                return SpectrumLEDRegion(colorRGB: sanitizedColor(color), rowCount: nil)
+            }
+            let cumulative = sizes.prefix(index + 1).reduce(0, +) / total
+            let minimumBoundary = previousBoundary + 1
+            let rowsNeededAfter = colors.count - index - 1
+            let maximumBoundary = max(minimumBoundary, safeRowCount - rowsNeededAfter)
+            let boundary = min(maximumBoundary, max(minimumBoundary, Int((cumulative * Double(safeRowCount)).rounded())))
+            defer { previousBoundary = boundary }
+            return SpectrumLEDRegion(colorRGB: sanitizedColor(color), rowCount: boundary - previousBoundary)
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case fftSize, snapshotHopFrames, refreshIntervalMilliseconds, bandCount, bandGapPixels, peakHoldSeconds, minimumDb, maximumDb, bandFallDbPerSecond, peakFallDbPerSecond, bandSeparation, darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB, darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent, ledSegmentCount, ledGapPercent
+        case layoutMode, audioSource, fftSize, snapshotHopFrames, refreshIntervalMilliseconds, bandCount, bandGapPixels, peakHoldSeconds, minimumDb, maximumDb, bandFallDbPerSecond, peakFallDbPerSecond, bandSeparation, peakMarkerRGB, hidePlotLabelsWhenIdle, darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB, darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent, ledRegions, ledSegmentCount, ledGapPercent
     }
 
     init() {}
@@ -119,6 +254,8 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         var settings = Self()
+        settings.layoutMode = try container.decodeIfPresent(SpectrumLayoutMode.self, forKey: .layoutMode) ?? settings.layoutMode
+        settings.audioSource = try container.decodeIfPresent(SpectrumAudioSource.self, forKey: .audioSource) ?? settings.audioSource
         settings.fftSize = try container.decodeIfPresent(Int.self, forKey: .fftSize) ?? settings.fftSize
         settings.snapshotHopFrames = try container.decodeIfPresent(Int.self, forKey: .snapshotHopFrames) ?? settings.snapshotHopFrames
         settings.refreshIntervalMilliseconds = try container.decodeIfPresent(Int.self, forKey: .refreshIntervalMilliseconds) ?? settings.refreshIntervalMilliseconds
@@ -130,6 +267,8 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
         settings.bandFallDbPerSecond = try container.decodeIfPresent(Double.self, forKey: .bandFallDbPerSecond) ?? settings.bandFallDbPerSecond
         settings.peakFallDbPerSecond = try container.decodeIfPresent(Double.self, forKey: .peakFallDbPerSecond) ?? settings.peakFallDbPerSecond
         settings.bandSeparation = try container.decodeIfPresent(Double.self, forKey: .bandSeparation) ?? settings.bandSeparation
+        settings.peakMarkerRGB = try container.decodeIfPresent([Double].self, forKey: .peakMarkerRGB) ?? settings.peakMarkerRGB
+        settings.hidePlotLabelsWhenIdle = try container.decodeIfPresent(Bool.self, forKey: .hidePlotLabelsWhenIdle) ?? settings.hidePlotLabelsWhenIdle
         settings.darkRedRGB = try container.decodeIfPresent([Double].self, forKey: .darkRedRGB) ?? settings.darkRedRGB
         settings.orangeRedRGB = try container.decodeIfPresent([Double].self, forKey: .orangeRedRGB) ?? settings.orangeRedRGB
         settings.orangeRGB = try container.decodeIfPresent([Double].self, forKey: .orangeRGB) ?? settings.orangeRGB
@@ -140,6 +279,15 @@ struct SpectrumAnalyzerSettings: Codable, Equatable {
         settings.yellowRegionPercent = try container.decodeIfPresent(Double.self, forKey: .yellowRegionPercent) ?? settings.yellowRegionPercent
         settings.ledSegmentCount = try container.decodeIfPresent(Double.self, forKey: .ledSegmentCount) ?? settings.ledSegmentCount
         settings.ledGapPercent = try container.decodeIfPresent(Double.self, forKey: .ledGapPercent) ?? settings.ledGapPercent
+        if let regions = try container.decodeIfPresent([SpectrumLEDRegion].self, forKey: .ledRegions), !regions.isEmpty {
+            settings.ledRegions = regions
+        } else {
+            settings.ledRegions = Self.migratedLEDRegions(
+                colors: [settings.darkRedRGB, settings.orangeRedRGB, settings.orangeRGB, settings.yellowRGB],
+                relativeSizes: [settings.darkRedRegionPercent, settings.orangeRedRegionPercent, settings.orangeRegionPercent, settings.yellowRegionPercent],
+                rowCount: Int(settings.ledSegmentCount.rounded())
+            )
+        }
         settings.sanitize()
         self = settings
     }
@@ -156,6 +304,7 @@ struct SpectrumLEDProfile: Codable, Identifiable, Equatable {
     var orangeRedRegionPercent: Double
     var orangeRegionPercent: Double
     var yellowRegionPercent: Double
+    var ledRegions: [SpectrumLEDRegion]
     var ledSegmentCount: Double
     var ledGapPercent: Double
 
@@ -169,6 +318,7 @@ struct SpectrumLEDProfile: Codable, Identifiable, Equatable {
         orangeRedRegionPercent = settings.orangeRedRegionPercent
         orangeRegionPercent = settings.orangeRegionPercent
         yellowRegionPercent = settings.yellowRegionPercent
+        ledRegions = settings.ledRegions
         ledSegmentCount = settings.ledSegmentCount
         ledGapPercent = settings.ledGapPercent
     }
@@ -182,8 +332,44 @@ struct SpectrumLEDProfile: Codable, Identifiable, Equatable {
         settings.orangeRedRegionPercent = orangeRedRegionPercent
         settings.orangeRegionPercent = orangeRegionPercent
         settings.yellowRegionPercent = yellowRegionPercent
+        settings.ledRegions = ledRegions
         settings.ledSegmentCount = ledSegmentCount
         settings.ledGapPercent = ledGapPercent
+        settings.sanitize()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB, darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent, ledRegions, ledSegmentCount, ledGapPercent
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        let defaults = SpectrumAnalyzerSettings()
+        darkRedRGB = try container.decodeIfPresent([Double].self, forKey: .darkRedRGB) ?? defaults.darkRedRGB
+        orangeRedRGB = try container.decodeIfPresent([Double].self, forKey: .orangeRedRGB) ?? defaults.orangeRedRGB
+        orangeRGB = try container.decodeIfPresent([Double].self, forKey: .orangeRGB) ?? defaults.orangeRGB
+        yellowRGB = try container.decodeIfPresent([Double].self, forKey: .yellowRGB) ?? defaults.yellowRGB
+        darkRedRegionPercent = try container.decodeIfPresent(Double.self, forKey: .darkRedRegionPercent) ?? defaults.darkRedRegionPercent
+        orangeRedRegionPercent = try container.decodeIfPresent(Double.self, forKey: .orangeRedRegionPercent) ?? defaults.orangeRedRegionPercent
+        orangeRegionPercent = try container.decodeIfPresent(Double.self, forKey: .orangeRegionPercent) ?? defaults.orangeRegionPercent
+        yellowRegionPercent = try container.decodeIfPresent(Double.self, forKey: .yellowRegionPercent) ?? defaults.yellowRegionPercent
+        ledSegmentCount = try container.decodeIfPresent(Double.self, forKey: .ledSegmentCount) ?? defaults.ledSegmentCount
+        ledGapPercent = try container.decodeIfPresent(Double.self, forKey: .ledGapPercent) ?? defaults.ledGapPercent
+        ledRegions = try container.decodeIfPresent([SpectrumLEDRegion].self, forKey: .ledRegions) ?? SpectrumAnalyzerSettings.migratedLEDRegions(
+            colors: [darkRedRGB, orangeRedRGB, orangeRGB, yellowRGB],
+            relativeSizes: [darkRedRegionPercent, orangeRedRegionPercent, orangeRegionPercent, yellowRegionPercent],
+            rowCount: Int(ledSegmentCount.rounded())
+        )
+        var sanitizedSettings = defaults
+        sanitizedSettings.ledSegmentCount = ledSegmentCount
+        sanitizedSettings.ledGapPercent = ledGapPercent
+        sanitizedSettings.ledRegions = ledRegions
+        sanitizedSettings.sanitize()
+        ledSegmentCount = sanitizedSettings.ledSegmentCount
+        ledGapPercent = sanitizedSettings.ledGapPercent
+        ledRegions = sanitizedSettings.ledRegions
     }
 }
 
@@ -194,6 +380,92 @@ struct SpectrumSnapshot: Equatable {
     let right: [Float]
     let leftPeaks: [Float]
     let rightPeaks: [Float]
+}
+
+/// A stable, real-time-safe handoff between the audio graph's taps and the replaceable analyzer.
+///
+/// The audio graph retains this object for its entire lifetime. Analyzer configuration can therefore
+/// replace the analysis worker without reinstalling taps or stopping/recreating any DSP nodes. A tap
+/// never waits for a replacement: it drops that analysis buffer if the handoff is momentarily busy.
+final class SpectrumAnalyzerInput: @unchecked Sendable {
+    private let analyzerPointer: ManagedAtomic<UnsafeRawPointer>
+    private let selectedAudioSource: ManagedAtomic<Int>
+    private let isRouting = ManagedAtomic<Bool>(false)
+
+    // Accessed only by the serialized control thread. This strong reference owns the object exposed
+    // through `analyzerPointer`; `isRouting` prevents it being released during a tap callback.
+    private var currentAnalyzer: AudioSpectrumAnalyzer
+
+    init(analyzer: AudioSpectrumAnalyzer, audioSource: SpectrumAudioSource) {
+        currentAnalyzer = analyzer
+        analyzerPointer = ManagedAtomic(Self.pointer(to: analyzer))
+        selectedAudioSource = ManagedAtomic(audioSource.atomicValue)
+    }
+
+    /// Called by the audio taps. The callback remains non-blocking when analysis is reconfigured.
+    func capture(_ buffer: AVAudioPCMBuffer, from source: SpectrumAudioSource) {
+        guard selectedAudioSource.load(ordering: .acquiring) == source.atomicValue,
+              isRouting.compareExchange(
+                expected: false,
+                desired: true,
+                ordering: .acquiringAndReleasing
+              ).exchanged else { return }
+        defer { isRouting.store(false, ordering: .releasing) }
+
+        // Re-check after entering the handoff so a concurrent source switch cannot admit stale data.
+        guard selectedAudioSource.load(ordering: .acquiring) == source.atomicValue else { return }
+        let analyzer = Unmanaged<AudioSpectrumAnalyzer>
+            .fromOpaque(analyzerPointer.load(ordering: .acquiring))
+            .takeUnretainedValue()
+        analyzer.capture(buffer, from: source)
+    }
+
+    /// Atomically changes which observer tap feeds the analyzer; the audio graph is untouched.
+    func setAudioSource(_ source: SpectrumAudioSource) {
+        let oldValue = selectedAudioSource.exchange(source.atomicValue, ordering: .acquiringAndReleasing)
+        guard oldValue != source.atomicValue else { return }
+        withRoutingPaused {
+            currentAnalyzer.setAudioSource(source)
+        }
+    }
+
+    /// Swaps only the analysis worker. Audio callbacks either use the old or new worker, never a
+    /// partially configured one, and never wait for the control thread.
+    func replaceAnalyzer(_ analyzer: AudioSpectrumAnalyzer, audioSource: SpectrumAudioSource) {
+        withRoutingPaused {
+            let previousAnalyzer = currentAnalyzer
+            currentAnalyzer = analyzer
+            analyzerPointer.store(Self.pointer(to: analyzer), ordering: .releasing)
+            selectedAudioSource.store(audioSource.atomicValue, ordering: .releasing)
+            withExtendedLifetime(previousAnalyzer) {}
+        }
+    }
+
+    func reset() {
+        withRoutingPaused {
+            currentAnalyzer.reset()
+        }
+    }
+
+    func resetPeaks() {
+        currentAnalyzer.resetPeaks()
+    }
+
+    private func withRoutingPaused(_ body: () -> Void) {
+        while !isRouting.compareExchange(
+            expected: false,
+            desired: true,
+            ordering: .acquiringAndReleasing
+        ).exchanged {
+            sched_yield()
+        }
+        defer { isRouting.store(false, ordering: .releasing) }
+        body()
+    }
+
+    private static func pointer(to analyzer: AudioSpectrumAnalyzer) -> UnsafeRawPointer {
+        UnsafeRawPointer(Unmanaged.passUnretained(analyzer).toOpaque())
+    }
 }
 
 private final class SpectrumSnapshotSlot: @unchecked Sendable {
@@ -222,7 +494,7 @@ private final class SpectrumSnapshotSlot: @unchecked Sendable {
     }
 }
 
-/// The mixer tap is an SPSC producer: it writes only producer-owned history and free snapshot slots.
+/// The selected audio tap is the sole producer: it writes only producer-owned history and free snapshot slots.
 final class AudioSpectrumAnalyzer: @unchecked Sendable {
     let fftSize: Int
     let snapshotIntervalFrames: Int
@@ -231,6 +503,8 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
     private let maximumDb: Float
     private let queue = DispatchQueue(label: "com.peq.spectrum-fft", qos: .userInitiated)
     private let isEnabled = ManagedAtomic<Bool>(false)
+    private let selectedAudioSource: ManagedAtomic<Int>
+    private let isCapturing = ManagedAtomic<Bool>(false)
     private let generation = ManagedAtomic<Int64>(0)
     private let bandFallDbPerSecond = AtomicFloat(Float(SpectrumAnalyzerTuning.defaultBandFallDbPerSecond))
     private let peakFallDbPerSecond = AtomicFloat(Float(SpectrumAnalyzerTuning.defaultPeakFallDbPerSecond))
@@ -260,14 +534,19 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
     private var lastPeakUpdate = CACurrentMediaTime()
     private var timer: DispatchSourceTimer?
 
-    var onSnapshot: (@Sendable (SpectrumSnapshot) -> Void)?
+    private let onSnapshot: (@Sendable (SpectrumSnapshot) -> Void)?
 
-    init(settings: SpectrumAnalyzerSettings) {
+    init(
+        settings: SpectrumAnalyzerSettings,
+        onSnapshot: (@Sendable (SpectrumSnapshot) -> Void)? = nil
+    ) {
+        self.onSnapshot = onSnapshot
         fftSize = settings.fftSize
         snapshotIntervalFrames = settings.snapshotHopFrames
         bandCount = settings.bandCount
         minimumDb = Float(settings.minimumDb)
         maximumDb = Float(settings.maximumDb)
+        selectedAudioSource = ManagedAtomic(settings.audioSource.atomicValue)
         leftDisplayed = Array(repeating: Float(settings.minimumDb), count: settings.bandCount)
         rightDisplayed = Array(repeating: Float(settings.minimumDb), count: settings.bandCount)
         leftPeaks = Array(repeating: Float(settings.minimumDb), count: settings.bandCount)
@@ -331,11 +610,39 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
 
     func setPeakHoldSeconds(_ value: Double) { peakHoldSeconds.store(Float(min(max(value, SpectrumAnalyzerSettings.peakHoldRange.lowerBound), SpectrumAnalyzerSettings.peakHoldRange.upperBound))) }
 
-    /// Called by the post-EQ mixer tap. No allocations, dispatching, or FFT work occur here.
-    func capture(_ buffer: AVAudioPCMBuffer) {
-        guard isEnabled.load(ordering: .acquiring),
+    func setAudioSource(_ source: SpectrumAudioSource) {
+        let previous = selectedAudioSource.exchange(source.atomicValue, ordering: .acquiringAndReleasing)
+        guard previous != source.atomicValue else { return }
+
+        // The control thread waits for any callback already admitted from the old source. New
+        // callbacks cannot enter because the selection changed before this gate is acquired.
+        while !isCapturing.compareExchange(
+            expected: false,
+            desired: true,
+            ordering: .acquiringAndReleasing
+        ).exchanged {
+            sched_yield()
+        }
+        reset()
+        isCapturing.store(false, ordering: .releasing)
+    }
+
+    /// Called by both audio taps. Only the selected source may enter the producer-owned capture state.
+    /// No allocations, dispatching, or FFT work occur here.
+    func capture(_ buffer: AVAudioPCMBuffer, from source: SpectrumAudioSource) {
+        guard selectedAudioSource.load(ordering: .acquiring) == source.atomicValue,
+              isEnabled.load(ordering: .acquiring),
               let channels = buffer.floatChannelData,
               buffer.format.channelCount > 0 else { return }
+        guard isCapturing.compareExchange(
+            expected: false,
+            desired: true,
+            ordering: .acquiringAndReleasing
+        ).exchanged else { return }
+        defer { isCapturing.store(false, ordering: .releasing) }
+
+        // Re-check after claiming the producer gate so a source change cannot admit stale samples.
+        guard selectedAudioSource.load(ordering: .acquiring) == source.atomicValue else { return }
         let currentGeneration = generation.load(ordering: .acquiring)
         if producerGeneration != currentGeneration {
             producerGeneration = currentGeneration
@@ -383,6 +690,24 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
             self.rightDisplayed = self.leftPeaks
             self.lastPeakUpdate = CACurrentMediaTime()
             self.onSnapshot?(SpectrumSnapshot(left: self.leftPeaks, right: self.rightPeaks, leftPeaks: self.leftPeaks, rightPeaks: self.rightPeaks))
+        }
+    }
+
+    /// Resets only the visual peak markers. Capture history and the audio graph continue unchanged.
+    func resetPeaks() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.leftPeaks = Array(repeating: self.minimumDb, count: self.bandCount)
+            self.rightPeaks = self.leftPeaks
+            self.leftPeakHoldRemaining = Array(repeating: 0, count: self.bandCount)
+            self.rightPeakHoldRemaining = self.leftPeakHoldRemaining
+            self.lastPeakUpdate = CACurrentMediaTime()
+            self.onSnapshot?(SpectrumSnapshot(
+                left: self.leftDisplayed,
+                right: self.rightDisplayed,
+                leftPeaks: self.leftPeaks,
+                rightPeaks: self.rightPeaks
+            ))
         }
     }
 
@@ -542,63 +867,245 @@ final class AudioSpectrumAnalyzer: @unchecked Sendable {
 
 struct SpectrumAnalyzerView: View {
     @EnvironmentObject private var appState: AppState
+    @StateObject private var nowPlaying = AppleMusicNowPlayingProvider()
+    @State private var chromeOpacity = 1.0
+    @State private var hideChromeWorkItem: DispatchWorkItem?
+    @State private var trackInfoDriftWorkItem: DispatchWorkItem?
+    @State private var trackInfoOffset = CGSize.zero
+    @State private var cursorIsHidden = false
+    @State private var lastTrackIdentity: AppleMusicTrackInfo.Identity?
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack {
             Color.black.ignoresSafeArea()
-            VStack(spacing: 16) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("POST-EQ SPECTRUM")
-                            .font(.system(size: 13, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.9))
-                        Text(appState.isProcessing ? String(
-                            format: "Output mixer · 20 Hz – 20 kHz · %d-point FFT · %.1f ms window at 48 kHz",
-                            appState.spectrumSettings.fftSize,
-                            Double(appState.spectrumSettings.fftSize) / 48
-                        ) : "Enable EQ to analyze output")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.white.opacity(0.55))
-                        Text(String(
-                            format: "Analyzer %.0f · Delivery %.0f · Metal %.0f fps",
-                            appState.spectrumPerformance.analyzerFPS,
-                            appState.spectrumPerformance.deliveryFPS,
-                            appState.spectrumPerformance.renderFPS
-                        ))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.45))
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 28)
-                .padding(.top, 22)
+            GeometryReader { geometry in
+                if appState.spectrumSettings.layoutMode == .fullSpectrum {
+                    spectrumContent
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                } else {
+                    VStack(spacing: 0) {
+                        Color.clear
+                            .overlay {
+                                AppleMusicTrackInfoView(state: nowPlaying.state)
+                                    .offset(trackInfoOffset)
+                            }
+                            .frame(width: geometry.size.width, height: geometry.size.height * 0.4)
+                            .clipped()
 
-                ZStack {
-                    SpectrumMetalView(snapshot: appState.spectrum, settings: appState.spectrumSettings) { fps in
-                        appState.reportSpectrumRenderFPS(fps)
+                        spectrumContent
+                            .frame(width: geometry.size.width, height: geometry.size.height * 0.6)
                     }
-                    SpectrumPlotLabels(
-                        minimumDb: Float(appState.spectrumSettings.minimumDb),
-                        maximumDb: Float(appState.spectrumSettings.maximumDb),
-                        bandCount: appState.spectrumSettings.bandCount
-                    )
-                        .allowsHitTesting(false)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(.bottom, 28)
 
-            Button {
-                appState.showSpectrumSettings()
-            } label: {
-                Label("Settings", systemImage: "gearshape")
-            }
-            .buttonStyle(.bordered)
-            .tint(.white.opacity(0.18))
-            .foregroundStyle(.white)
-            .padding(24)
+            SpectrumActivityMonitor(onActivity: recordActivity)
+                .allowsHitTesting(false)
         }
         .frame(minWidth: 900, minHeight: 600)
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress { keyPress in
+            recordActivity()
+            guard keyPress.characters.lowercased() == "o" else { return .ignored }
+            appState.showSpectrumSettings()
+            return .handled
+        }
+        .onAppear {
+            updateNowPlayingPolling()
+            recordActivity()
+        }
+        .onChange(of: appState.spectrumSettings.layoutMode) {
+            updateNowPlayingPolling()
+            recordActivity()
+        }
+        .onChange(of: appState.isSpectrumPresented) {
+            updateNowPlayingPolling()
+            if appState.isSpectrumPresented {
+                recordActivity()
+            } else {
+                revealCursor()
+            }
+        }
+        .onChange(of: nowPlaying.state) {
+            resetSpectrumPeaksForNewTrack()
+        }
+        .onDisappear {
+            hideChromeWorkItem?.cancel()
+            hideChromeWorkItem = nil
+            trackInfoDriftWorkItem?.cancel()
+            trackInfoDriftWorkItem = nil
+            nowPlaying.stop()
+            revealCursor()
+        }
+    }
+
+    private var spectrumContent: some View {
+        ZStack {
+            SpectrumMetalView(
+                snapshot: appState.spectrum,
+                settings: appState.spectrumSettings,
+                chromeOpacity: Float(appState.spectrumSettings.hidePlotLabelsWhenIdle ? chromeOpacity : 1)
+            ) { fps in
+                appState.reportSpectrumRenderFPS(fps)
+            }
+            SpectrumPlotLabels(
+                minimumDb: Float(appState.spectrumSettings.minimumDb),
+                maximumDb: Float(appState.spectrumSettings.maximumDb),
+                bandCount: appState.spectrumSettings.bandCount
+            )
+                .opacity(appState.spectrumSettings.hidePlotLabelsWhenIdle ? chromeOpacity : 1)
+                .allowsHitTesting(false)
+        }
+        .contextMenu {
+            Button("Spectrum Options…") {
+                recordActivity()
+                appState.showSpectrumSettings()
+            }
+        }
+    }
+
+    private func recordActivity() {
+        revealCursor()
+        hideChromeWorkItem?.cancel()
+        withAnimation(.easeOut(duration: 0.15)) {
+            chromeOpacity = 1
+        }
+
+        let workItem = DispatchWorkItem {
+            withAnimation(.easeInOut(duration: 0.8)) {
+                chromeOpacity = 0
+            }
+            guard !cursorIsHidden else { return }
+            NSCursor.setHiddenUntilMouseMoves(true)
+            cursorIsHidden = true
+        }
+        hideChromeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: workItem)
+    }
+
+    private func revealCursor() {
+        guard cursorIsHidden else { return }
+        NSCursor.unhide()
+        cursorIsHidden = false
+    }
+
+    private func updateNowPlayingPolling() {
+        if appState.isSpectrumPresented,
+           appState.spectrumSettings.layoutMode == .trackInfoAndSpectrum {
+            nowPlaying.start()
+            ensureTrackInfoDriftScheduled()
+        } else {
+            nowPlaying.stop()
+            trackInfoDriftWorkItem?.cancel()
+            trackInfoDriftWorkItem = nil
+            trackInfoOffset = .zero
+        }
+    }
+
+    private func resetSpectrumPeaksForNewTrack() {
+        guard case let .playing(track) = nowPlaying.state else {
+            lastTrackIdentity = nil
+            return
+        }
+        guard track.identity != lastTrackIdentity else { return }
+        lastTrackIdentity = track.identity
+        appState.resetSpectrumPeaks()
+    }
+
+    private func ensureTrackInfoDriftScheduled() {
+        guard trackInfoDriftWorkItem == nil,
+              appState.isSpectrumPresented,
+              appState.spectrumSettings.layoutMode == .trackInfoAndSpectrum else { return }
+
+        let workItem = DispatchWorkItem {
+            trackInfoDriftWorkItem = nil
+            guard appState.isSpectrumPresented,
+                  appState.spectrumSettings.layoutMode == .trackInfoAndSpectrum else { return }
+            let offsets = [-2.0, -1.0, 1.0, 2.0]
+            withAnimation(.easeInOut(duration: 0.8)) {
+                trackInfoOffset = CGSize(
+                    width: offsets.randomElement() ?? 1,
+                    height: offsets.randomElement() ?? -1
+                )
+            }
+            ensureTrackInfoDriftScheduled()
+        }
+        trackInfoDriftWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 30...60), execute: workItem)
+    }
+}
+
+private struct SpectrumActivityMonitor: NSViewRepresentable {
+    let onActivity: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onActivity: onActivity)
+    }
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ view: MonitorView, context: Context) {
+        context.coordinator.onActivity = onActivity
+    }
+
+    static func dismantleNSView(_ nsView: MonitorView, coordinator: Coordinator) {
+        coordinator.stopMonitoring()
+    }
+
+    final class MonitorView: NSView {
+        weak var coordinator: Coordinator?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            coordinator?.monitor(window: window)
+        }
+    }
+
+    final class Coordinator {
+        var onActivity: () -> Void
+        private weak var monitoredWindow: NSWindow?
+        private var eventMonitor: Any?
+
+        init(onActivity: @escaping () -> Void) {
+            self.onActivity = onActivity
+        }
+
+        deinit {
+            stopMonitoring()
+        }
+
+        func monitor(window: NSWindow?) {
+            monitoredWindow = window
+            guard eventMonitor == nil else { return }
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+                .mouseMoved,
+                .leftMouseDown,
+                .rightMouseDown,
+                .otherMouseDown,
+                .leftMouseDragged,
+                .rightMouseDragged,
+                .otherMouseDragged,
+                .scrollWheel,
+                .keyDown
+            ]) { [weak self] event in
+                guard let self, event.window === monitoredWindow else { return event }
+                onActivity()
+                return event
+            }
+        }
+
+        func stopMonitoring() {
+            if let eventMonitor {
+                NSEvent.removeMonitor(eventMonitor)
+                self.eventMonitor = nil
+            }
+            monitoredWindow = nil
+        }
     }
 }
 
@@ -609,29 +1116,27 @@ private struct SpectrumPlotLabels: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let plots = SpectrumPlotLayout.plotRects(in: geometry.size)
+            let plot = SpectrumPlotLayout.plotRect(in: geometry.size)
             ZStack(alignment: .topLeading) {
-                ForEach(Array(plots.enumerated()), id: \.offset) { channel, plot in
-                    Text(channel == 0 ? "LEFT" : "RIGHT")
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.cyan)
-                        .position(x: 48, y: plot.minY - 12)
+                ForEach(dbTicks, id: \.self) { tick in
+                    Text("\(Int(tick))")
+                        .font(.system(size: 9, weight: .light, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.32))
+                        .position(x: plot.minX - 16, y: yPosition(tick, in: plot))
 
-                    ForEach(dbTicks, id: \.self) { tick in
-                        Text("\(Int(tick))")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.55))
-                            .position(x: 48, y: yPosition(tick, in: plot))
-                    }
+                    Text("\(Int(tick))")
+                        .font(.system(size: 9, weight: .light, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.32))
+                        .position(x: plot.maxX + 16, y: yPosition(tick, in: plot))
+                }
 
-                    ForEach(Array(stride(from: 0, to: bandCount, by: 2)), id: \.self) { band in
-                        Text(frequencyLabel(forBand: band))
-                            .font(.system(size: labelFontSize(for: plot), design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.55))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.5)
-                            .position(x: xPosition(forBand: band, in: plot), y: plot.maxY + 12)
-                    }
+                ForEach(Array(stride(from: 0, to: bandCount, by: 2)), id: \.self) { band in
+                    Text(frequencyLabel(forBand: band))
+                        .font(.system(size: labelFontSize(for: plot), weight: .light, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.32))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                        .position(x: xPosition(forBand: band, in: plot), y: plot.maxY + 12)
                 }
             }
         }
@@ -648,7 +1153,7 @@ private struct SpectrumPlotLabels: View {
 
     private func labelFontSize(for plot: CGRect) -> CGFloat {
         let widthPerLabel = (plot.width / CGFloat(max(1, bandCount))) * 2
-        return min(10, max(5, widthPerLabel * 0.35))
+        return min(9, max(4.5, widthPerLabel * 0.32))
     }
 
     private func frequencyLabel(forBand band: Int) -> String {

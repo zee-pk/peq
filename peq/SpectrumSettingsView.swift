@@ -8,6 +8,30 @@ struct SpectrumSettingsView: View {
 
     var body: some View {
         Form {
+            Section("Layout") {
+                Picker("Spectrum layout", selection: $draft.layoutMode) {
+                    ForEach(SpectrumLayoutMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Track Info + Spectrum shows Apple Music details above a spectrum occupying the lower 60% of the screen.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Signal") {
+                Picker("Spectrum audio", selection: $draft.audioSource) {
+                    ForEach(SpectrumAudioSource.allCases) { source in
+                        Text(source.title).tag(source)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("Pre-EQ shows the incoming signal before equalization. Post-EQ shows the processed output.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Analysis") {
                 Picker("FFT size", selection: $draft.fftSize) {
                     ForEach(SpectrumAnalyzerSettings.fftSizes, id: \.self) { size in
@@ -30,6 +54,11 @@ struct SpectrumSettingsView: View {
                 DecimalSetting("Peak fall", value: $draft.peakFallDbPerSecond, range: SpectrumAnalyzerTuning.fallRateRange, step: 1, suffix: "dB/s")
                 DecimalSetting("Peak hold", value: $draft.peakHoldSeconds, range: SpectrumAnalyzerSettings.peakHoldRange, step: 0.05, suffix: "s")
                 DecimalSetting("Band separation", value: $draft.bandSeparation, range: SpectrumAnalyzerTuning.bandSeparationRange, step: 0.05, suffix: "amount")
+            }
+
+            Section("Display") {
+                ColorSetting("Peak marker color", rgb: peakMarkerColorBinding)
+                Toggle("Hide labels and guides when idle", isOn: $draft.hidePlotLabelsWhenIdle)
             }
 
             Section("LED appearance") {
@@ -62,17 +91,26 @@ struct SpectrumSettingsView: View {
                     }
                     .disabled(profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                DecimalSetting("LED rows", value: $draft.ledSegmentCount, range: SpectrumAnalyzerSettings.ledSegmentRange, step: 1, suffix: "segments")
+                IntegerSetting(
+                    "Color regions",
+                    value: regionCountBinding,
+                    range: SpectrumAnalyzerSettings.ledRegionCountRange.lowerBound...maximumRegionCount,
+                    suffix: "regions"
+                )
+                DecimalSetting("LED bars", value: ledRowCountBinding, range: SpectrumAnalyzerSettings.ledSegmentRange, step: 1, suffix: "bars")
                 DecimalSetting("LED gap", value: $draft.ledGapPercent, range: SpectrumAnalyzerSettings.percentageRange, step: 1, suffix: "%")
-                ColorSetting("Dark red", rgb: colorBinding(\.darkRedRGB))
-                DecimalSetting("Dark red region", value: $draft.darkRedRegionPercent, range: SpectrumAnalyzerSettings.percentageRange, step: 1, suffix: "%")
-                ColorSetting("Orange red", rgb: colorBinding(\.orangeRedRGB))
-                DecimalSetting("Orange red region", value: $draft.orangeRedRegionPercent, range: SpectrumAnalyzerSettings.percentageRange, step: 1, suffix: "%")
-                ColorSetting("Orange", rgb: colorBinding(\.orangeRGB))
-                DecimalSetting("Orange region", value: $draft.orangeRegionPercent, range: SpectrumAnalyzerSettings.percentageRange, step: 1, suffix: "%")
-                ColorSetting("Yellow", rgb: colorBinding(\.yellowRGB))
-                DecimalSetting("Yellow region", value: $draft.yellowRegionPercent, range: SpectrumAnalyzerSettings.percentageRange, step: 1, suffix: "%")
-                Text("Profiles contain LED appearance only. Load a profile, then Apply to show it. Color-region values are relative sizes and are automatically normalized.")
+                ForEach(Array(draft.ledRegions.enumerated()), id: \.element.id) { index, region in
+                    ColorSetting("Region \(index + 1) color", rgb: colorBinding(for: region.id))
+                    if index < draft.ledRegions.count - 1 {
+                        IntegerSetting(
+                            "Region \(index + 1) size",
+                            value: rowCountBinding(for: region.id),
+                            range: 1...maximumLEDRowCount,
+                            suffix: "bars"
+                        )
+                    }
+                }
+                Text("Profiles contain LED appearance only. Each region has a fixed number of LED bars; the final region uses all remaining bars. Load a profile, then Apply to show it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -92,17 +130,48 @@ struct SpectrumSettingsView: View {
         .onAppear { draft = appState.spectrumSettings }
     }
 
-    private func colorBinding(_ keyPath: WritableKeyPath<SpectrumAnalyzerSettings, [Double]>) -> Binding<Color> {
+    private var maximumLEDRowCount: Int { max(1, Int(draft.ledSegmentCount.rounded())) }
+    private var maximumRegionCount: Int { min(SpectrumAnalyzerSettings.ledRegionCountRange.upperBound, maximumLEDRowCount) }
+
+    private var regionCountBinding: Binding<Int> {
+        Binding(get: { draft.ledRegions.count }, set: { draft.setLEDRegionCount($0) })
+    }
+
+    private var ledRowCountBinding: Binding<Double> {
+        Binding(get: { draft.ledSegmentCount }, set: { draft.setLEDRowCount($0) })
+    }
+
+    private var peakMarkerColorBinding: Binding<Color> {
         Binding(
-            get: {
-                let rgb = draft[keyPath: keyPath]
-                return Color(red: rgb.indices.contains(0) ? rgb[0] : 0, green: rgb.indices.contains(1) ? rgb[1] : 0, blue: rgb.indices.contains(2) ? rgb[2] : 0)
-            },
+            get: { color(from: draft.peakMarkerRGB) },
+            set: { draft.peakMarkerRGB = rgb(from: $0) }
+        )
+    }
+
+    private func rowCountBinding(for id: UUID) -> Binding<Int> {
+        Binding(
+            get: { draft.ledRegions.first(where: { $0.id == id })?.rowCount ?? 1 },
+            set: { draft.setLEDRegionRowCount($0, id: id) }
+        )
+    }
+
+    private func colorBinding(for id: UUID) -> Binding<Color> {
+        Binding(
+            get: { color(from: draft.ledRegions.first(where: { $0.id == id })?.colorRGB ?? [0, 0, 0]) },
             set: { color in
-                guard let nsColor = NSColor(color).usingColorSpace(.deviceRGB) else { return }
-                draft[keyPath: keyPath] = [Double(nsColor.redComponent), Double(nsColor.greenComponent), Double(nsColor.blueComponent)]
+                guard let index = draft.ledRegions.firstIndex(where: { $0.id == id }) else { return }
+                draft.ledRegions[index].colorRGB = rgb(from: color)
             }
         )
+    }
+
+    private func color(from rgb: [Double]) -> Color {
+        Color(red: rgb.indices.contains(0) ? rgb[0] : 0, green: rgb.indices.contains(1) ? rgb[1] : 0, blue: rgb.indices.contains(2) ? rgb[2] : 0)
+    }
+
+    private func rgb(from color: Color) -> [Double] {
+        guard let nsColor = NSColor(color).usingColorSpace(.deviceRGB) else { return [0, 0, 0] }
+        return [Double(nsColor.redComponent), Double(nsColor.greenComponent), Double(nsColor.blueComponent)]
     }
 }
 
